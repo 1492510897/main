@@ -1,0 +1,113 @@
+import time
+import requests
+from thrift.transport import THttpClient
+from thrift.protocol import TBinaryProtocol
+from thrift.Thrift import TType, TMessageType
+
+# ==========================================
+# 1. 定义 Thrift 结构体 (模拟 Java 的 Normal 类)
+# 因为没有 .thrift 文件，我们需要手动定义序列化逻辑
+# ==========================================
+
+class Normal:
+    def __init__(self):
+        self.time = None      # string
+        self.game_id = None   # string
+        self.arch_index = None # string
+
+    def write(self, oprot):
+        # 手动实现 Thrift 的 write 方法
+        # 对应 Java 生成的代码中的 write 方法
+        oprot.writeStructBegin('Normal')
+
+        if self.time is not None:
+            oprot.writeFieldBegin('time', TType.STRING, 1)
+            oprot.writeString(self.time)
+            oprot.writeFieldEnd()
+
+        if self.game_id is not None:
+            oprot.writeFieldBegin('game_id', TType.STRING, 2)
+            oprot.writeString(self.game_id)
+            oprot.writeFieldEnd()
+
+        if self.arch_index is not None:
+            oprot.writeFieldBegin('arch_index', TType.STRING, 3)
+            oprot.writeString(self.arch_index)
+            oprot.writeFieldEnd()
+
+        oprot.writeFieldStop()
+        oprot.writeStructEnd()
+
+# ==========================================
+# 2. 构造请求体 (模拟 MasterApi 的调用)
+# ==========================================
+
+def build_thrift_payload(time_str, game_id_str, arch_index_str):
+    """
+    手动构造 Thrift 请求二进制流
+    对应 Java: client.someMethod(normal)
+    """
+    # 内存传输，用于临时存储二进制数据
+    from thrift.transport import TTransport
+    trans_out = TTransport.TMemoryBuffer()
+    prot_out = TBinaryProtocol.TBinaryProtocol(trans_out)
+
+    # --- 写入 Method Call Header ---
+    # 对应 TBinaryProtocol 的 writeMessageBegin
+    # 假设调用的方法名是 "save" (你需要根据抓包或文档确认方法名，或者尝试常见的如 "execute", "call")
+    # 这里的 "1" 是 Message Type CALL
+    prot_out.writeMessageBegin("save", TMessageType.CALL, 1)
+
+    # --- 写入参数结构 ---
+    # Thrift 函数参数通常包裹在一个 struct 中，比如 save_args
+    # 这里假设 save 方法接收一个 Normal 类型的参数，字段 ID 为 1
+    prot_out.writeStructBegin("save_args")
+    
+    # 写入 Normal 对象 (字段 ID 1)
+    normal_obj = Normal()
+    normal_obj.time = time_str
+    normal_obj.game_id = game_id_str
+    normal_obj.arch_index = arch_index_str
+
+    prot_out.writeFieldBegin("normal", TType.STRUCT, 1)
+    normal_obj.write(prot_out) # 调用上面定义的 write
+    prot_out.writeFieldEnd()
+
+    prot_out.writeFieldStop()
+    prot_out.writeStructEnd()
+    prot_out.writeMessageEnd()
+
+    # 获取二进制数据
+    return trans_out.getvalue()
+
+# ==========================================
+# 3. 发送 HTTP 请求
+# ==========================================
+
+def main():
+    # 参数
+    game_id = "100027788"
+    arch_index = "1"
+    time_str = str(int(time.time()))
+    
+    # 构造 Payload
+    body_data = build_thrift_payload(time_str, game_id, str(game_id), arch_index)
+    
+    # 目标 URL
+    url = "http://save.api.4399.com/union/MasterApi"
+    
+    # 请求头 (必须包含 Cookie)
+    headers = {
+        "User-Agent": "Mozilla/5.0...",
+        "Content-Type": "application/x-thrift", # 或者 application/octet-stream
+        "Cookie": "Pauth=...; USESSIONID=...;" # 这里填入你的 Cookie
+    }
+    
+    # 发送
+    response = requests.post(url, data=body_data, headers=headers)
+    
+    print("Status:", response.status_code)
+    print("Response Hex:", response.content.hex())
+
+if __name__ == "__main__":
+    main()

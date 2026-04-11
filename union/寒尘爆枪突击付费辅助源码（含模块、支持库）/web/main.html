@@ -1,0 +1,894 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>HC</title>
+    <style type="text/css">
+        @charset "utf-8";
+
+        body,
+        div,
+        p,
+        iframe,
+        label,
+        input {
+            margin: 0;
+            padding: 0;
+            -webkit-box-sizing: border-box;
+            box-sizing: border-box;
+        }
+
+        input {
+            color: #fafafa;
+            font-family: inherit;
+            border: none;
+            outline: none;
+        }
+
+        body {
+            font-family: "微软雅黑";
+        }
+
+        #app {
+            display: flex;
+            margin: 0 auto;
+            width: 1192px;
+            height: 774px;
+            padding: 15px;
+            background-color: #323232;
+            -webkit-user-select: none;
+            user-select: none;
+            position: relative;
+        }
+
+        #aside-bar {
+            display: flex;
+            flex-direction: column;
+            padding: 15px;
+            width: 200px;
+            border-radius: 12px;
+            background-color: #3c3c3c;
+        }
+
+        #image {
+            --wh: 84px;
+            margin: 0 auto;
+            margin-top: 9px;
+            width: var(--wh);
+            height: var(--wh);
+            border-radius: 50%;
+            background: url("https://q.qlogo.cn/headimg_dl?dst_uin=3184668964&spec=640&img_type=jpg") center / cover no-repeat;
+            transition: 0.3s;
+            cursor: pointer;
+        }
+
+        #image:hover {
+            transform: scale(1.1);
+        }
+
+        #version {
+            margin-top: auto;
+        }
+
+        #version>.inner-text {
+            --size: 13px;
+        }
+
+        #game-area {
+            --gw: 950px;
+            --gh: 600px;
+            margin-left: 12px;
+        }
+
+        #container {
+            margin: 12px 0;
+            width: var(--gw);
+            height: var(--gh);
+            border-radius: 12px;
+            background-color: #3c3c3c;
+            overflow: hidden;
+        }
+
+        #flash {
+            width: 100%;
+            height: 100%;
+        }
+
+        #cheat-group {
+            --iw: 170px;
+            --ih: 35px;
+            margin-top: 28px;
+        }
+
+        .slider-box {
+            display: flex;
+            padding: 0 5px;
+            width: var(--iw);
+            height: var(--ih);
+            border-radius: 8px;
+            background-color: #484848;
+        }
+
+        .prev-slider,
+        .next-slider {
+            --wh: 25px;
+            width: var(--wh);
+            height: var(--wh);
+            padding: 8px;
+            margin: auto 0;
+            border-radius: 8px;
+            background-color: transparent;
+            transition: 0.3s;
+            cursor: pointer;
+        }
+
+        .prev-slider:hover,
+        .next-slider:hover {
+            background-color: #545454;
+        }
+
+        .inner-icon {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        .inner-icon>path {
+            fill: #fafafa;
+        }
+
+        .view-slider {
+            margin: 0 auto;
+        }
+
+        .view-slider>.inner-text {
+            line-height: var(--ih);
+        }
+
+        .param-group>.param {
+            margin-top: 12px;
+        }
+
+        .change-btn {
+            margin-top: 12px;
+            width: var(--iw);
+            height: var(--ih);
+            line-height: var(--ih);
+            color: #fafafa;
+            text-align: center;
+            font-size: 12px;
+            border-radius: 8px;
+            background-color: #484848;
+            transition: 0.3s;
+            cursor: pointer;
+        }
+
+        .change-btn:hover {
+            background-color: #545454;
+        }
+
+        .select-box {
+            position: relative;
+        }
+
+        .select-panel {
+            width: 100%;
+            top: 100%;
+            left: 0;
+            position: absolute;
+            border-radius: 8px;
+            background-color: #323232;
+            overflow-y: hidden;
+            transition-property: height;
+        }
+
+        .view-select {
+            width: 100%;
+            height: var(--ih);
+            transition: 0.3s;
+            cursor: pointer;
+        }
+
+        .view-select>.inner-text {
+            line-height: var(--ih);
+        }
+
+        .view-select:hover {
+            background-color: #484848;
+        }
+
+        .view-select.last-select {
+            border-radius: 0 0 8px 8px;
+        }
+
+        .inner-text {
+            --size: 12px;
+            color: #fafafa;
+            text-align: center;
+            font-size: var(--size);
+            line-height: var(--size);
+        }
+
+        .inner-input {
+            padding: 0 12px;
+            width: var(--iw);
+            height: var(--ih);
+            line-height: var(--ih);
+            font-size: 12px;
+            text-align: center;
+            border-radius: 8px;
+            background-color: #484848;
+            position: relative;
+        }
+
+        .btn-group {
+            display: flex;
+            padding: 0 15px;
+            width: var(--gw);
+            height: 60px;
+            border-radius: 12px;
+            background-color: #3c3c3c;
+        }
+
+        .group-container {
+            display: flex;
+            margin: auto 0;
+            overflow: hidden;
+            border-radius: 8px;
+        }
+
+        .group-btn {
+            --wh: 34px;
+            padding: 9px;
+            width: var(--wh);
+            height: var(--wh);
+            background-color: #484848;
+            transition: 0.3s;
+            cursor: pointer;
+        }
+
+        .group-btn:hover {
+            background-color: #545454;
+        }
+
+        .group-right {
+            margin-left: auto;
+        }
+
+        #custom-swf {
+            flex-grow: 1;
+            flex-shrink: 1;
+            margin: auto 0;
+            height: 34px;
+            overflow: hidden;
+            border-radius: 8px;
+            background-color: #484848;
+        }
+
+        #custom-url {
+            padding: 0 12px;
+            width: 100%;
+            height: 100%;
+            font-size: 12px;
+            background-color: transparent;
+            cursor: pointer;
+        }
+
+        #custom-btn {
+            margin: auto 0;
+            margin-left: 12px;
+            width: 120px;
+            height: 34px;
+            color: #fafafa;
+            font-size: 12px;
+            line-height: 34px;
+            text-align: center;
+            border-radius: 8px;
+            background-color: #484848;
+            transition: 0.3s;
+            cursor: pointer;
+        }
+
+        #custom-btn:hover {
+            background-color: #545454;
+        }
+
+        #file-picker {
+            display: none;
+            width: 0;
+            height: 0;
+        }
+
+        #modal {
+            display: flex;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            position: absolute;
+            z-index: 999;
+            background-color: #00000066;
+            transition: opacity 0.5s;
+            visibility: hidden;
+            opacity: 0;
+        }
+
+        #modal[visible] {
+            visibility: visible;
+            opacity: 1;
+        }
+
+        #modal-container {
+            display: flex;
+            flex-direction: column;
+            margin: auto;
+            padding: 18px;
+            width: 350px;
+            border-radius: 12px;
+            background-color: #fafafa;
+        }
+
+        #modal-header {
+            font-size: 14px;
+            font-weight: 700;
+            line-height: 14px;
+        }
+
+        #modal-content {
+            margin: 48px 0;
+            font-size: 13px;
+            line-height: 18px;
+            letter-spacing: 1px;
+            text-align: center;
+        }
+
+        #modal-btn-group {
+            display: flex;
+            margin-left: auto;
+        }
+
+        .modal-btn {
+            display: none;
+            padding: 12px 36px;
+            color: #fafafa;
+            font-size: 13px;
+            line-height: 13px;
+            border-radius: 8px;
+            background-color: #165dff;
+            cursor: pointer;
+        }
+
+        .modal-btn:not(:first-child) {
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div id="aside-bar">
+            <div id="image" title="技术交流"></div>
+            <div id="cheat-group">
+                <div class="param-group" type="normal">
+                    <div class="param select-box" name="type" tips="类型" select-role="parent"></div>
+                    <div class="param select-box" name="method" tips="方法" select-role="child"></div>
+                    <div class="param edit-box" name="string" tips="字符串" value-type="string"></div>
+                    <div class="param edit-box" name="number" tips="数值" value-type="number"></div>
+                </div>
+                <div class="param-group" type="extend">
+                    <div class="param select-box" name="type" tips="类型" select-role="parent"></div>
+                    <div class="param select-box" name="method" tips="方法" select-role="child"></div>
+                    <div class="param edit-box" name="string" tips="字符串" value-type="string"></div>
+                    <div class="param edit-box" name="number" tips="数值" value-type="number"></div>
+                </div>
+            </div>
+            <div id="version">
+                <p class="inner-text">v1.3.8</p>
+            </div>
+        </div>
+        <div id="game-area">
+            <div id="header" class="btn-group">
+                <div class="group-container">
+                    <div id="refresh" class="group-btn" title="刷新">
+                        <svg class="inner-icon" viewBox="0 0 1066 1024" version="1.1" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M913.408 384H732.16c-23.04 0-41.984-18.944-41.984-41.984 0-23.04 18.944-41.984 41.984-41.984h72.704c-65.536-92.672-173.568-153.088-295.936-153.088-200.192 0-362.496 162.304-362.496 362.496 0 200.192 162.304 362.496 362.496 362.496 200.192 0 362.496-162.304 362.496-362.496 0-23.04 18.944-41.984 41.984-41.984 23.04 0 41.984 18.944 41.984 41.984 0 246.272-199.68 445.952-445.952 445.952-246.272 0-445.952-199.68-445.952-445.952 0-246.272 199.68-445.952 445.952-445.952 149.504 0 281.6 73.728 362.496 186.368V175.104c0-23.04 18.944-41.984 41.984-41.984 23.04 0 41.984 18.944 41.984 41.984v167.424c-1.024 23.04-19.456 41.472-42.496 41.472z"></path>
+                        </svg>
+                    </div>
+                    <div id="sound" class="group-btn" title="音量调整" state></div>
+                    <div id="cache" class="group-btn" title="缓存目录">
+                        <svg class="inner-icon" viewBox="0 0 1066 1024" version="1.1" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M404.821333 85.333333l128 170.666667h384a85.333333 85.333333 0 0 1 85.333334 85.333333v512a85.333333 85.333333 0 0 1-85.333334 85.333334h-768a85.333333 85.333333 0 0 1-85.333333-85.333334V170.666667a85.333333 85.333333 0 0 1 85.333333-85.333334h256z m85.333334 256l-128-170.666666h-213.333334v298.666666h768V341.333333h-426.666666z m-341.333334 213.333334v298.666666h768v-298.666666h-768z"></path>
+                        </svg>
+                    </div>
+                    <div id="group" class="group-btn" title="交流反馈">
+                        <svg class="inner-icon" viewBox="0 0 1066 1024" version="1.1" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M304.607147 576c-17.066667 0-34.133333-8.533333-46.933334-17.066667-12.8-12.8-17.066667-29.866667-17.066666-46.933333 0-17.066667 8.533333-34.133333 17.066666-46.933333 4.266667-4.266667 12.8-12.8 21.333334-12.8 17.066667-8.533333 34.133333-8.533333 46.933333 0 8.533333 4.266667 12.8 8.533333 21.333333 12.8 12.8 12.8 17.066667 29.866667 17.066667 46.933333 0 17.066667-8.533333 34.133333-17.066667 46.933333-8.533333 8.533333-25.6 17.066667-42.666666 17.066667zM513.673813 576c-8.533333 0-17.066667 0-25.6-4.266667-8.533333-4.266667-12.8-8.533333-21.333333-12.8-12.8-12.8-17.066667-29.866667-17.066667-46.933333 0-17.066667 8.533333-34.133333 17.066667-46.933333 25.6-25.6 68.266667-25.6 89.6 0 12.8 12.8 17.066667 29.866667 17.066667 46.933333 0 17.066667-8.533333 34.133333-17.066667 46.933333-8.533333 4.266667-12.8 12.8-21.333333 12.8s-12.8 4.266667-21.333334 4.266667zM722.74048 576c-8.533333 0-17.066667 0-25.6-4.266667-8.533333-4.266667-12.8-8.533333-21.333333-12.8-12.8-12.8-17.066667-29.866667-17.066667-46.933333 0-17.066667 8.533333-34.133333 17.066667-46.933333 25.6-25.6 68.266667-25.6 89.6 0 12.8 12.8 17.066667 29.866667 17.066666 46.933333 0 17.066667-8.533333 34.133333-17.066666 46.933333-8.533333 4.266667-12.8 12.8-21.333334 12.8s-12.8 4.266667-21.333333 4.266667z"></path>
+                            <path d="M44.34048 972.8c-12.8 0-25.6-4.266667-34.133333-17.066667-8.533333-12.8-12.8-29.866667-8.533334-42.666666l64-170.666667C23.007147 669.866667 1.673813 593.066667 1.673813 512 1.673813 260.266667 232.073813 51.2 513.673813 51.2S1025.673813 260.266667 1025.673813 512s-230.4 460.8-512 460.8c-81.066667 0-162.133333-17.066667-230.4-46.933333l-230.4 42.666666c-4.266667 4.266667-4.266667 4.266667-8.533333 4.266667z m243.2-132.266667c4.266667 0 12.8 0 17.066667 4.266667 59.733333 29.866667 132.266667 42.666667 204.8 42.666667 234.666667 0 426.666667-166.4 426.666666-375.466667s-192-375.466667-426.666666-375.466667S87.007147 307.2 87.007147 512c0 72.533333 21.333333 136.533333 64 200.533333 8.533333 12.8 8.533333 25.6 4.266666 38.4l-46.933333 123.733334 170.666667-34.133334h8.533333z"></path>
+                        </svg>
+                    </div>
+                </div>
+                <div class="group-container group-right">
+                    <div id="close" class="group-btn" title="关闭">
+                        <svg class="inner-icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M267.37827225 821.67603832l244.16802683-243.81518261 241.69811866 241.69811867a47.04586235 47.04586235 0 1 0 65.98182267-65.98182206L577.52812112 511.87903302 821.34330372 268.18146558a47.04586235 47.04586235 0 0 0-3.41082497-67.04035465 47.04586235 47.04586235 0 0 0-64.57044586-0.94091681L509.54684965 443.8977622 267.84873098 202.19964291A47.04586235 47.04586235 0 0 0 200.80837696 198.31835922a47.04586235 47.04586235 0 0 0-1.41137617 66.92273949l2.46990815 2.46990815 241.69811866 242.16857738L199.39700079 754.04761106a47.04586235 47.04586235 0 0 0 3.4108256 66.92273949A47.04586235 47.04586235 0 0 0 267.37827225 821.67603832z"></path>
+                        </svg>
+                    </div>
+                </div>
+            </div>
+            <div id="container">
+                <iframe id="flash" title="4399" frameborder="no" scrolling="no" src></iframe>
+            </div>
+            <div id="footer" class="btn-group">
+                <div id="custom-swf">
+                    <input id="file-picker" title="filePicker" type="file" accept="application/x-shockwave-flash">
+                    <input id="custom-url" title="双击选择SWF文件" placeholder="select&nbsp;a&nbsp;local&nbsp;SWF&nbsp;file" type="text" readonly>
+                </div>
+                <div id="custom-btn" title="配置SWF文件">替换SWF</div>
+            </div>
+        </div>
+        <div id="modal">
+            <div id="modal-container">
+                <div id="modal-header"></div>
+                <div id="modal-content"></div>
+                <div id="modal-btn-group">
+                    <div id="modal-confirm" class="modal-btn" title="确定">确定</div>
+                    <div id="modal-cancel" class="modal-btn" title="取消">取消</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <template id="components">
+        <input class="inner-input" type="text">
+        <div class="change-btn" title="执行">修改</div>
+        <div class="slider-box">
+            <div class="prev-slider" title="上一页">
+                <svg class="inner-icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M187.472937 589.322449c179.809148 137.24378 359.620101 274.467691 539.431055 411.691602 64.01603 48.874492 156.299395 3.225908 156.299395-77.322449V100.306592c0-80.548357-92.283365-126.195135-156.299395-77.342318a8736038.67748 8736038.67748 0 0 1-539.431055 411.691602c-51.013056 38.954735-51.013056 115.733512 0 154.666573z"></path>
+                </svg>
+            </div>
+            <div class="view-slider">
+                <p class="inner-text"></p>
+            </div>
+            <div class="next-slider" title="下一页">
+                <svg class="inner-icon" viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M836.510807 434.657683C656.703466 297.433771 476.896125 160.20986 297.110458 22.964274 233.074559-25.888544 140.812869 19.758235 140.812869 100.306592v823.38501c0 80.548357 92.26169 126.196941 156.297589 77.322449 179.785667-137.225717 359.593008-274.447822 539.400349-411.691602 51.01125-38.933061 51.01125-115.711837 0-154.664766z"></path>
+                </svg>
+            </div>
+        </div>
+        <div class="select-panel" total="0"></div>
+        <div class="view-select">
+            <p class="inner-text"></p>
+        </div>
+        <svg class="inner-icon" link="sound" state="open" viewBox="0 0 1066 1024" version="1.1" xmlns="http://www.w3.org/2000/svg">
+            <path d="M266.112 692.736c54.613333 0 107.178667 21.674667 146.773333 60.501333L512 850.304V173.696L412.928 270.762667a209.706667 209.706667 0 0 1-146.773333 60.501333H128v361.472h138.112z m88.106667 124.458667a125.866667 125.866667 0 0 0-88.106667-36.266667H128c-47.146667 0-85.333333-39.466667-85.333333-88.192V331.264c0-48.725333 38.186667-88.192 85.333333-88.192h138.112c32.768 0 64.298667-12.970667 88.064-36.266667l99.114667-97.109333C507.733333 56.405333 597.333333 96.256 597.333333 173.696v676.608c0 77.44-89.642667 117.290667-144.042666 64l-99.072-97.109333z m416-645.205334a46.08 46.08 0 0 1 62.805333 0c197.76 187.946667 197.76 492.714667 0 680.661334a46.08 46.08 0 0 1-62.848 0 40.746667 40.746667 0 0 1 0-59.690667c163.114667-155.008 163.114667-406.272 0-561.28a40.746667 40.746667 0 0 1 0-59.690667z m-117.162667 149.034667a46.08 46.08 0 0 1 62.805333 0c107.562667 102.186667 107.562667 267.946667 0 370.176a46.08 46.08 0 0 1-62.805333 0 40.746667 40.746667 0 0 1 0-59.733333c72.874667-69.205333 72.874667-181.504 0-250.752a40.746667 40.746667 0 0 1 0-59.733334z"></path>
+        </svg>
+        <svg class="inner-icon" link="sound" state="off" viewBox="0 0 1066 1024" version="1.1" xmlns="http://www.w3.org/2000/svg">
+            <path d="M265.088 696.064a213.333333 213.333333 0 0 1 149.333333 61.013333l98.048 96.085334V170.837333L414.464 266.965333a213.333333 213.333333 0 0 1-149.333333 61.013334H128v368.085333h137.088z m89.6 121.941333a128 128 0 0 0-89.6-36.608H128a85.333333 85.333333 0 0 1-85.333333-85.333333V327.978667a85.333333 85.333333 0 0 1 85.333333-85.333334h137.088a128 128 0 0 0 89.6-36.608l98.005333-96.128c54.016-52.906667 145.066667-14.677333 145.066667 60.928v682.325334c0 75.605333-91.050667 113.877333-145.066667 60.928l-97.962666-96.085334zM968.96 348.885333a44.458667 44.458667 0 0 1 0 61.354667l-98.389333 101.845333 98.474666 101.888a44.458667 44.458667 0 0 1 0 61.354667 40.96 40.96 0 0 1-59.306666 0l-98.432-101.888-98.474667 101.888a40.96 40.96 0 0 1-59.306667 0 44.458667 44.458667 0 0 1 0-61.354667l98.474667-101.888-98.389333-101.845333a44.458667 44.458667 0 0 1 0-61.354667 40.96 40.96 0 0 1 59.306666 0l98.389334 101.802667 98.389333-101.802667a40.96 40.96 0 0 1 59.306667 0z"></path>
+        </svg>
+    </template>
+    <script type="text/javascript">
+        (function (global) {
+            "use strict";
+            const template = (function () {
+                const temps = {
+                    get(compId) {
+                        return this.hasOwnProperty(compId) ? this[compId].cloneNode(true) : null;
+                    }
+                };
+                const doc = document.querySelector("#components").content;
+                temps.editBox = doc.querySelector(".inner-input");
+                temps.selectBox = doc.querySelector(".select-panel");
+                temps.selectItem = doc.querySelector(".view-select");
+                temps.changeBtn = doc.querySelector(".change-btn");
+                temps.sliderBox = doc.querySelector(".slider-box");
+                temps.soundOpen = doc.querySelector("[link='sound'][state='open']");
+                temps.soundOff = doc.querySelector("[link='sound'][state='off']");
+                return temps;
+            })();
+            const message = {
+                btns: ["确定", "取消"],
+                modal: document.querySelector("#modal"),
+                header: document.querySelector("#modal-header"),
+                content: document.querySelector("#modal-content"),
+                buttons: document.querySelector("#modal-btn-group"),
+                init() {
+                    const btns = this.buttons;
+                    const confirm = btns.querySelector("#modal-confirm");
+                    const cancel = btns.querySelector("#modal-cancel");
+                    const callback = this.hide.bind(this);
+                    confirm.addEventListener("click", callback);
+                    cancel.addEventListener("click", callback);
+                    this.init = null;
+                },
+                show(header = "提示", content = "感谢支持寒尘爆枪突击辅助付费版本", buttons = ["确定"]) {
+                    this.modal.setAttribute("visible", "");
+                    this.header.textContent = header;
+                    this.content.textContent = content;
+                    const childs = (() => {
+                        const elems = [];
+                        for (const elem of this.buttons.children) {
+                            elems.push(elem);
+                        };
+                        return elems;
+                    })();
+                    buttons.forEach((button) => {
+                        const btnIdx = this.btns.indexOf(button);
+                        const child = childs[btnIdx];
+                        child.style.display = (btnIdx === -1 ? "none" : "block");
+                    });
+                },
+                hide() {
+                    this.modal.removeAttribute("visible");
+                }
+            };
+            message.init();
+            class editBox {
+                constructor(element, visible = false) {
+                    if (element) {
+                        const name = element.getAttribute("name");
+                        const tips = element.getAttribute("tips");
+                        const cloned = template.get("editBox");
+                        cloned.setAttribute("name", name);
+                        cloned.setAttribute("title", tips);
+                        cloned.setAttribute("placeholder", tips);
+                        this.__element = element.appendChild(cloned);
+                        this.display(visible);
+                        if (element.hasAttribute("value-type")) {
+                            this.__char = element.getAttribute("value-type") === "string";
+                        } else {
+                            this.__char = true;
+                        };
+                        this.__valid = true;
+                    } else {
+                        this.__valid = false;
+                    };
+                };
+                get() {
+                    let value = this.__element.value;
+                    if (!value) value = "0";
+                    return this.__char ? ("'" + value + "'") : value;
+                };
+                set(value) {
+                    this.__element.value = value;
+                };
+                display(visible) {
+                    const stl = this.__element.style;
+                    if (visible) {
+                        stl.display = "";
+                    } else {
+                        stl.display = "none";
+                    };
+                };
+                tips(text) {
+                    this.__element.setAttribute("placeholder", text);
+                };
+            };
+            class selectBox extends editBox {
+                static maxItemNum = 9;
+                constructor(element) {
+                    super(element, true);
+                    if (!this.__valid) return;
+                    this.__element.style.cursor = "pointer";
+                    this.__element.setAttribute("readonly", "");
+                    this.__element.addEventListener("click", () => {
+                        if (this.isNull()) return;
+                        const current = project.selected;
+                        if (current && current !== this) current.displayPanel(false);
+                        this.displayPanel(!this.__show);
+                    });
+                    this.__parent = element.getAttribute("select-role") === "parent";
+                    this.__panel = element.appendChild(template.get("selectBox"));
+                    this.displayPanel(false);
+                    this.clearAll();
+                };
+                displayPanel(visible) {
+                    const stl = this.__panel.style;
+                    if (visible) {
+                        stl.zIndex = "999";
+                        this.updatePanelHeight();
+                        project.selected = this;
+                    } else {
+                        stl.transitionDuration = "0.5s";
+                        stl.zIndex = "10";
+                        stl.height = "0";
+                        project.selected = null;
+                    };
+                    this.__show = visible;
+                };
+                clearAll() {
+                    const panel = this.__panel;
+                    while (panel.firstChild) { panel.removeChild(panel.firstChild); };
+                    this.__total = 0;
+                };
+                isNull() {
+                    return this.getLen() === 0;
+                };
+                getLen() {
+                    return this.__total;
+                };
+                createItem(value, name, type) {
+                    const total = this.getLen() + 1;
+                    const max = selectBox.maxItemNum;
+                    const page = Math.ceil(total / max);
+                    const cloned = template.get("selectItem");
+                    if (type) cloned.setAttribute("type", type);
+                    cloned.setAttribute("value", value);
+                    cloned.setAttribute("page", page);
+                    cloned.querySelector(".inner-text").textContent = name;
+                    if (total % max === 0) cloned.classList.add("last-select");
+                    this.__total++;
+                    return cloned;
+                };
+                updateItems(items, type = null) {
+                    this.clearAll();
+                    const frag = document.createDocumentFragment();
+                    for (const value in items) {
+                        const data = items[value];
+                        if (!this.__parent && typeof (data) === "string") {
+                            frag.appendChild(this.createItem(value, data, type));
+                        } else {
+                            frag.appendChild(this.createItem(value, data.name, type));
+                        };
+                    };
+                    this.__panel.appendChild(frag);
+                    const total = this.getLen();
+                    for (let idx = 0; idx < total; idx++) {
+                        const view = this.__panel.children[idx];
+                        view.addEventListener("click", (e) => {
+                            const target = e.currentTarget;
+                            const value = target.getAttribute("value");
+                            const comps = project.getEditBox();
+                            comps.forEach((comp) => comp.display(false));
+                            if (this.__parent) {
+                                const select = project.getSelectBox(false);
+                                if (select.__valid) {
+                                    select.set("");
+                                    select.updateItems(project.curdef.type[value].method, value);
+                                };
+                            } else {
+                                const __type = target.getAttribute("type");
+                                const __method = project.curdef.type[__type].method[value];
+                                if (typeof (__method) === "object") {
+                                    const __elem = __method.elem;
+                                    const __tips = __method.tips;
+                                    if (__elem.length === __tips.length) {
+                                        for (let idx = 0; idx < __elem.length; idx++) {
+                                            const __comp = project.component[project.type][__elem[idx]];
+                                            __comp.set("");
+                                            __comp.tips(__tips[idx]);
+                                            __comp.display(true);
+                                        };
+                                    };
+                                };
+                            };
+                            this.set(value);
+                            this.displayPanel(false);
+                        });
+                    };
+                    const max = selectBox.maxItemNum;
+                    if (total > max) {
+                        const panel = this.__panel;
+                        new sliderBox(panel, Math.ceil(total / max) - 1, 0, (idx, view) => {
+                            let __total = 0;
+                            const cache = Number(panel.getAttribute("total"));
+                            const page = String(idx + 1);
+                            for (let __idx = 0; __idx < total; __idx++) {
+                                const __view = panel.children[__idx];
+                                const __page = __view.getAttribute("page");
+                                if (page === __page) {
+                                    __total++;
+                                    __view.style.display = "";
+                                } else {
+                                    __view.style.display = "none";
+                                };
+                            };
+                            panel.setAttribute("total", __total);
+                            if (this.__show && cache !== __total) this.updatePanelHeight();
+                            view.textContent = "第" + page + "页";
+                        });
+                        const last = panel.children[total - 1];
+                        last.classList.add("last-select");
+                    };
+                };
+                updatePanelHeight() {
+                    const panel = this.__panel;
+                    const stl = panel.style;
+                    stl.transitionDuration = this.__show ? "" : "0.5s";
+                    stl.height = "auto";
+                    const { height } = panel.getBoundingClientRect();
+                    stl.height = "0";
+                    panel.offsetHeight;
+                    stl.height = height + "px";
+                };
+            };
+            class sliderBox {
+                constructor(element, max, min, callback, after = true) {
+                    if (element) {
+                        this.__max = max;
+                        this.__min = min;
+                        this.__cur = -1;
+                        const cloned = template.get("sliderBox");
+                        if (typeof (callback) === "function") {
+                            this.__call = callback;
+                            this.__view = cloned.querySelector(".view-slider>.inner-text");
+                            const prev = cloned.querySelector(".prev-slider");
+                            const next = cloned.querySelector(".next-slider");
+                            prev.addEventListener("click", () => this.update(this.__cur - 1));
+                            next.addEventListener("click", () => this.update(this.__cur + 1));
+                            this.update(this.__min);
+                        };
+                        if (after) {
+                            element.appendChild(cloned);
+                        } else {
+                            element.insertBefore(cloned, element.firstChild);
+                        };
+                    };
+                };
+                update(cur) {
+                    if (cur > this.__max) {
+                        this.__cur = this.__min;
+                    } else if (cur < this.__min) {
+                        this.__cur = this.__max;
+                    } else {
+                        this.__cur = cur;
+                    };
+                    this.__call(this.__cur, this.__view);
+                };
+            };
+            function call(data) {
+                global.open(data, "_self");
+            };
+            function isIE() {
+                return !!(global.ActiveXObject) || ("ActiveXObject" in global);
+            };
+            (() => {
+                const elems = document.querySelectorAll(".group-btn");
+                for (let idx = 0; idx < elems.length; idx++) {
+                    const elem = elems[idx];
+                    if (elem.id === "sound") {
+                        elem.addEventListener("click", (e) => {
+                            const target = e.currentTarget;
+                            const child = target.firstChild;
+                            const exec = target.getAttribute("state") === "open" ? "off" : "open";
+                            const compId = "sound" + exec.charAt(0).toUpperCase() + exec.slice(1, exec.length);
+                            const cloned = template.get(compId);
+                            if (child) target.removeChild(child);
+                            target.appendChild(cloned);
+                            target.setAttribute("state", exec);
+                            call("#" + exec + "_" + elem.id);
+                        });
+                        elem.click();
+                    } else {
+                        elem.addEventListener("click", () => call("#" + elem.id));
+                    };
+                };
+                const curl = document.querySelector("#custom-url");
+                const custom = document.querySelector("#custom-btn");
+                const picker = document.querySelector("#file-picker");
+                curl.addEventListener("dblclick", () => picker.click());
+                custom.addEventListener("click", (e) => {
+                    const url = project.custom;
+                    if (url) {
+                        call("#custom?url=" + btoa(url));
+                        return;
+                    };
+                    message.show("自定义配置", "请选择需要替换的SWF文件");
+                });
+                picker.addEventListener("change", (e) => {
+                    const files = e.target.files;
+                    if (files.length > 0) {
+                        const file = files[0];
+                        const url = project.custom;
+                        if (url) URL.revokeObjectURL(url);
+                        project.custom = URL.createObjectURL(file);
+                        curl.value = file.name;
+                    };
+                });
+                const image = document.querySelector("#image");
+                image.addEventListener("click", () => call("#author"));
+            })();
+            const project = {
+                type: "",
+                custom: "",
+                component: {},
+                curdef: null,
+                selected: null,
+                define: { normal: { name: "基础", type: { achieve: { name: "勋章", method: { completeAllAchieve: "解锁所有勋章", reachieve: "删除当前类型" } }, ai: { name: "AI", method: { heroAI: "P1-开启/关闭AI", stopEnemy: "怪物-开启/关闭攻击", stopWe: "队友-开启/关闭攻击", parasiticBoss: "寄生首领", parasiticPet: "寄生尸宠", parasiticId: { name: "寄生指定实体", elem: ["string"], tips: ["实体ID"] }, charmAndParasiticNear: "寄生附近敌人", aiTestMode: { name: "设置AI模式", elem: ["string"], tips: ["代码"] } } }, drop: { name: "掉落", method: { dropTest: { name: "开启掉落测试", elem: ["number"], tips: ["倍率"] }, closeDropTest: { name: "开启/关闭掉落测试", elem: ["number"], tips: ["倍率"] } } }, equip: { name: "装备", method: { addArmsChip: { name: "添加所有武器碎片", elem: ["number"], tips: ["数量"] }, addRareArms: "添加所有稀有武器", addBlackArms: "添加所有黑色武器", setStrengthenLv: { name: "设置强化等级(武器)", elem: ["number"], tips: ["等级"] }, setEvoLv: { name: "设置进阶等级(武器)", elem: ["number"], tips: ["等级"] }, sameToFirst: "复制基础属性(武器)", bagSameToFirst: "复制拓展属性(武器)", addEquipChip: { name: "添加所有装备碎片", elem: ["number"], tips: ["数量"] }, addSuit: "添加所有套装", addAllFashion: "添加所有时装", addAllDevice: { name: "添加所有装置", elem: ["number"], tips: ["数量"] }, addAllWeapon: { name: "添加所有副手", elem: ["number"], tips: ["数量"] }, setFirstArmsGodSkill: { name: "设置神级技能(武器)", elem: ["string"], tips: ["技能名,技能名..."] }, addRanBlackArms: { name: "添加随机黑色武器", elem: ["string"], tips: ["等级,数量"] }, testBlackArms: "背包所有武器升级99", addBlackArmsPro: "大幅增加黑色武器掉率", showArmsCreator: "显示武器生成器" } }, level: { name: "地图", method: { unlockGoto: { name: "解锁至指定地图", elem: ["string"], tips: ["地图名"] }, setAllDemDiy: { name: "设置地图模式", elem: ["string"], tips: ["代码"] }, stopAccOpen: "开启防加速检测", unlockAllMap: "解锁所有地图", winAllMap: "通关所有地图", unlockAllDiff: "解锁所有难度", setDpsMul: { name: "设置P1战斗力倍数", elem: ["number"], tips: ["倍数"] }, testEnemy: "开启/关闭小怪出兵", testLevel: "沃土镇设置测试状态", setAnger: { name: "设置副手所需怒气值", elem: ["number"], tips: ["怒气值"] }, setEndlessLv: { name: "设置当前无尽层级", elem: ["number"], tips: ["层级"] }, setBossLifePer: { name: "设置敌人生命值百分比", elem: ["number"], tips: ["百分之"] }, setWeLifePer: { name: "设置队友生命值百分比", elem: ["number"], tips: ["百分之"] }, killAllPartner: "杀死我方所有队友", openAllSweeping: "开启所有难度扫荡", clearMainCharger: "清空P1弹夹和携弹量", moveBody: { name: "移动实体到指定位置", elem: ["string"], tips: ["实体ID,X,Y"] } } }, more: { name: "队友", method: { addMore: "添加队友(小樱)" } }, other: { name: "其他", method: { setPartnerExploit: { name: "设置功勋值", elem: ["number"], tips: ["功勋值"] }, setActive: { name: "设置活跃度", elem: ["number"], tips: ["活跃值"] }, showParts90: "显示90级零件套数", showSpecialParts: "显示特殊零件数量", addAllFood: { name: "添加所有食材", elem: ["number"], tips: ["数量"] }, setFoodProfiAll: { name: "设置厨艺值", elem: ["number"], tips: ["厨艺值"] } } }, pay: { name: "充值", method: { pay: { name: "充值", elem: ["number"], tips: ["数量"] } } }, pet: { name: "尸宠", method: { addNowCraftExp: { name: "添加飞船经验", elem: ["number"], tips: ["经验值"] }, setNowCraftLv: { name: "设置飞船等级", elem: ["number"], tips: ["等级"] }, clearAllPet: "清除所有尸宠", setPetLv: { name: "设置当前尸宠等级", elem: ["number"], tips: ["等级"] }, addNowGenePro: { name: "添加当前基因体掉率", elem: ["number"], tips: ["百分之"] } } }, player: { name: "角色", method: { noZuobi: "解除作弊", isZuobi: "设置作弊", setHeroLv: { name: "设置角色等级", elem: ["number"], tips: ["等级"] }, addHeroExp: { name: "添加角色经验", elem: ["number"], tips: ["经验值"] }, setHeroExp: { name: "设置角色经验", elem: ["number"], tips: ["经验值"] }, addCoin: { name: "添加银币", elem: ["number"], tips: ["数量"] }, addSore: { name: "添加积分", elem: ["number"], tips: ["数量"] }, clearAllDoubleAdd: "清除所有双倍时间", setLoveValue: { name: "设置好感度", elem: ["number"], tips: ["好感度"] }, initKeySetting: "初始化按键设置", openNewPartner: "添加可上场队友个数", setHeroDefine: { name: "设置P1定义", elem: ["string"], tips: ["角色名"] }, toP1: { name: "设置P1", elem: ["string"], tips: ["角色名"] } } }, save: { name: "存档", method: { initPlayerSave: "初始化存档", autoSaveTime: { name: "设置自动存档时间间隔", elem: ["number"], tips: ["秒"] }, savePlayerSave: "保存存档", supplePlayerSave: "载入存档(补充处理)", suppleSummer: "修复存档数据", logout: "切换存档(返回登录界面)" } }, skill: { name: "技能", method: { unlockSkill: "解锁技能系统", clearNowSkill: "删除当前技能", addProfi: { name: "添加熟练度", elem: ["number"], tips: ["熟练度"] }, setProfi: { name: "设置熟练度", elem: ["number"], tips: ["熟练度"] }, setDayProfi: { name: "设置今日熟练度", elem: ["number"], tips: ["今日熟练度"] } } }, system: { name: "系统", method: { setFrame: { name: "设置帧数", elem: ["number"], tips: ["帧数"] }, setToLocalTime: "开启/关闭本地时间", newDay: "新的一天", newWeek: "新的一周", newWeek6: "新的一周(周六刷新)", speedOnlineTime: { name: "设置在线时间加速倍数", elem: ["number"], tips: ["倍数"] }, setInitErrorB: "开启/关闭错误输出" } }, task: { name: "任务", method: { unlockTask: "解锁任务系统", unlockMainTask: "解锁所有主线任务", nowTaskComplete: "完成当前任务", nowTaskGet: "接取当前任务", setNowTaskNum: { name: "设置当前任务目标次数", elem: ["number"], tips: ["次数"] } } }, things: { name: "物品", method: { addAllThings: { name: "添加所有物品", elem: ["number"], tips: ["数量"] }, addAllKey: { name: "添加所有钥匙", elem: ["number"], tips: ["数量"] }, addPartsAll: { name: "添加零件", elem: ["string"], tips: ["等级,数量"] }, addSpecialParts: { name: "添加特殊零件", elem: ["string"], tips: ["数量"] }, clearBag: "清除当前背包", clearHouse: "清除当前仓库", setBagLock: { name: "解锁当前背包格子", elem: ["number"], tips: ["数量"] }, sortByTime: "按照日期排序", delNoPositionThings: "清除位置溢出物品" } }, ui: { name: "UI", method: { showApp: { name: "显示指定界面", elem: ["string"], tips: ["代码(标签)"] }, hideStat: "隐藏stat", hideUI: "显示/隐藏所有界面", stopHandUp: "显示防加速界面", showGuide: "显示任务引导", showHurt: "开启/关闭所有伤害显示", setEffectUrl: { name: "设置特效Url", elem: ["string"], tips: ["代码,Url"] }, setBulletEffectUrl: { name: "设置子弹Url", elem: ["string"], tips: ["代码,Url"] }, scaleScene: { name: "设置视野缩放比例", elem: ["number"], tips: ["百分之"] } } }, union: { name: "军队", method: { showUnionInfo: "显示军队数据", clearUnionData: "清除军队数据", setUnionRankLevel: { name: "设置军衔等级", elem: ["number"], tips: ["等级(1-26)"] }, setCreateUnionMoney: { name: "设置创建军队所需黄金", elem: ["number"], tips: ["黄金"] }, setContribution: { name: "设置个人贡献", elem: ["number"], tips: ["贡献值"] }, setNowMapMax: "取消争霸贡献限制", doVatiables: { name: "执行军队变量", elem: ["number"], tips: ["变量ID"] }, completeAllUnionTask: "完成所有军队任务", showSuppliesNum: "显示贡献数据", doUnionTask: { name: "完成指定军队任务", elem: ["number"], tips: ["任务ID"] }, setUnionTitle: { name: "设置军队名称", elem: ["string"], tips: ["名称"] }, showBattleBtn: "显示争霸按钮", openUnionRole: "开启/关闭职位权限" } }, wilder: { name: "秘境", method: { unlockAllWider: "解锁所有秘境", setNowWiderNum: { name: "设置秘境已挑战次数", elem: ["number"], tips: ["次数"] } } }, post: { name: "职务", method: { setPostLv: { name: "设置职务等级", elem: ["number"], tips: ["等级"] }, addPostExp: { name: "添加职务经验", elem: ["number"], tips: ["经验值"] } } }, peak: { name: "巅峰", method: { setPeakLv: { name: "设置巅峰等级", elem: ["number"], tips: ["等级"] }, setPeakExp: { name: "添加巅峰经验", elem: ["number"], tips: ["经验值"] } } } } }, extend: { name: "拓展", type: { hero: { name: "角色", method: { playerName: { name: "设置角色昵称", elem: ["string"], tips: ["昵称"] }, level: { name: "设置角色等级", elem: ["number"], tips: ["等级"] }, exp: { name: "设置角色经验", elem: ["number"], tips: ["经验值"] }, arms: { name: "解锁角色武器格子", elem: ["number"], tips: ["数量"] }, skill: { name: "解锁角色技能格子", elem: ["number"], tips: ["数量"] } } }, more: { name: "队友", method: { add: { name: "添加队友", elem: ["string"], tips: ["角色名"] }, remove: "删除队友", exploit: { name: "设置功勋值", elem: ["number"], tips: ["功勋值"] }, love: { name: "设置好感度", elem: ["number"], tips: ["好感度"] }, attack: { name: "设置攻击能力", elem: ["number"], tips: ["数值"] }, defence: { name: "设置防御能力", elem: ["number"], tips: ["数值"] }, dieNum: { name: "设置殒命次数", elem: ["number"], tips: ["次数"] }, killNum: { name: "设置击毙敌人", elem: ["number"], tips: ["数量"] }, killBossNum: { name: "设置击毙首领", elem: ["number"], tips: ["数量"] }, allGivingNum: { name: "设置送礼累计", elem: ["number"], tips: ["次数"] }, hateGiftNum: { name: "设置送其不喜欢礼物累计", elem: ["number"], tips: ["次数"] }, lockLen: { name: "设置可上场队友数量", elem: ["number"], tips: ["数量"] } } }, drop: { name: "掉落", method: { deviceNum: { name: "设置装置今日已掉落", elem: ["number"], tips: ["数量"] }, weaponNum: { name: "设置副手今日已掉落", elem: ["number"], tips: ["数量"] }, normalChestNum: { name: "设置稀有宝箱累计已掉落", elem: ["number"], tips: ["数量"] }, magicChestNum: { name: "设置传奇宝箱累计已掉落", elem: ["number"], tips: ["数量"] }, tigerChest: { name: "设置异虎宝箱累计已掉落", elem: ["number"], tips: ["数量"] }, keyNum: { name: "设置秘境钥匙今日已掉落", elem: ["number"], tips: ["数量"] }, bloodStoneNum: { name: "设置血石今日已掉落", elem: ["number"], tips: ["数量"] }, blackChipNum: { name: "设置黑色碎片今日已掉落", elem: ["number"], tips: ["数量"] }, allBlackChipNum: { name: "设置黑色碎片累计已掉落", elem: ["number"], tips: ["数量"] }, armsBlackChipNum: { name: "设置黑武碎片今日已掉落", elem: ["number"], tips: ["数量"] }, allArmsBlackChipNum: { name: "设置黑武碎片累计已掉落", elem: ["number"], tips: ["数量"] }, partsNum: { name: "设置零件今日已掉落", elem: ["number"], tips: ["数量"] }, equipGem: { name: "设置装备宝石今日已掉落", elem: ["number"], tips: ["数量"] }, ironChiefBook: { name: "设置冥王图鉴今日已掉落", elem: ["number"], tips: ["数量"] }, madheart: { name: "设置战神之心今日已掉落", elem: ["number"], tips: ["数量"] }, mhA: { name: "设置战神之心累计已掉落", elem: ["number"], tips: ["数量"] }, nintyEquipBlackNum: { name: "设置黑色装备今日已掉落", elem: ["number"], tips: ["数量"] }, allNintyEquipBlackNum: { name: "设置黑色装备累计已掉落", elem: ["number"], tips: ["数量"] }, nintyArmsBlackNum: { name: "设置黑色武器今日已掉落", elem: ["number"], tips: ["数量"] }, allNintyArmsBlackNum: { name: "设置黑色武器累计已掉落", elem: ["number"], tips: ["数量"] }, dragonChestNum: { name: "设置远古宝箱今日已掉落", elem: ["number"], tips: ["数量"] }, timeCMore: { name: "设置悬停沙漏碎片已掉落附加", elem: ["number"], tips: ["次数"] }, arenaStamp: { name: "设置优胜券累计已掉落", elem: ["number"], tips: ["数量"] }, weekObj: { name: "设置材料每周已掉落数量", elem: ["string", "number"], tips: ["材料名", "数量"] }, dayObj: { name: "设置材料每日已掉落数量", elem: ["string", "number"], tips: ["材料名", "数量"] }, dayAll: { name: "设置材料累计已掉落数量", elem: ["string", "number"], tips: ["材料名", "数量"] } } }, map: { name: "地图", method: { unlockOne: { name: "解锁指定地图", elem: ["string"], tips: ["地图名"] }, unlockAll: "解锁所有地图", winNum: { name: "设置通关次数", elem: ["string", "number"], tips: ["地图名", "次数"] }, rebirthNum: { name: "设置重生次数", elem: ["string", "number"], tips: ["地图名", "次数"] }, bulletNum: { name: "设置射出子弹", elem: ["string", "number"], tips: ["地图名", "数量"] }, time: { name: "设置通关时长", elem: ["string", "number"], tips: ["地图名", "秒"] }, star: { name: "设置获得星级", elem: ["string", "number"], tips: ["地图名", "星级"] } } }, level: { name: "关卡", method: { over: "通关", restart: "重玩", killAllEnemy: "杀死敌方所有实体" } }, wilder: { name: "秘境", method: { unlockAllWider: "解锁所有秘境", wilderKeyNum: { name: "设置秘境钥匙", elem: ["number"], tips: ["数量"] } } }, bag: { name: "背包", method: { armsBag: { name: "解锁武器背包格子", elem: ["number"], tips: ["数量"] }, equipBag: { name: "解锁装备背包格子", elem: ["number"], tips: ["数量"] }, thingsBag: { name: "解锁物品背包格子", elem: ["number"], tips: ["数量"] }, geneBag: { name: "解锁基因背包格子", elem: ["number"], tips: ["数量"] }, partsBag: { name: "解锁零件背包格子", elem: ["number"], tips: ["数量"] }, pet: { name: "解锁尸宠背包格子", elem: ["number"], tips: ["数量"] }, bossCard: { name: "解锁魂卡背包格子", elem: ["number"], tips: ["数量"] }, armsHouse: { name: "解锁武器仓库格子", elem: ["number"], tips: ["数量"] }, equipHouse: { name: "解锁装备仓库格子", elem: ["number"], tips: ["数量"] }, unlockAll: "解锁所有格子", clear_armsBag: "删除所有背包武器", clear_equipBag: "删除所有背包装备", clear_thingsBag: "删除所有背包物品", clear_geneBag: "删除所有背包基因", clear_partsBag: "删除所有背包零件", clear_pet: "删除所有背包尸宠", clear_armsHouse: "删除所有仓库武器", clear_equipHouse: "删除所有仓库装备" } }, count: { name: "计数", method: { dieNum: { name: "殒命次数", elem: ["number"], tips: ["次数"] }, killNum: { name: "击毙敌人", elem: ["number"], tips: ["数量"] }, killBossNum: { name: "击毙首领", elem: ["number"], tips: ["数量"] }, weaponKillNum: { name: "副手击杀", elem: ["number"], tips: ["数量"] }, vehicleKillNum: { name: "载具击杀", elem: ["number"], tips: ["数量"] }, dropArmsNum: { name: "武器掉落", elem: ["number"], tips: ["数量"] }, dropEquipNum: { name: "装备掉落", elem: ["number"], tips: ["数量"] }, bossNoOrangeNum: { name: "不掉橙装", elem: ["number"], tips: ["次数"] }, maxKingLevel: { name: "擒王等级", elem: ["number"], tips: ["等级"] }, glidingTime: { name: "滑翔", elem: ["number"], tips: ["秒"] }, charmMaxNum: { name: "魅惑", elem: ["number"], tips: ["次数"] }, skillGiftNum: { name: "馈赠", elem: ["number"], tips: ["次数"] }, moreMissileMaxNum: { name: "派生导弹", elem: ["number"], tips: ["次数"] }, maxFlyHigh: { name: "飞行高度", elem: ["number"], tips: ["高度"] }, maxFallHigh: { name: "下坠高度", elem: ["number"], tips: ["高度"] }, blackMarketMaxNum: { name: "黑市交易", elem: ["number"], tips: ["次数"] }, lotteryCoin: { name: "全是银币", elem: ["number"], tips: ["次数"] }, lotteryAllOrangeNum: { name: "全是橙装", elem: ["number"], tips: ["次数"] }, dieFly: { name: "死亡飞行", elem: ["number"], tips: ["码数"] } } }, money: { name: "货币", method: { coin: { name: "设置银币", elem: ["number"], tips: ["数量"] }, money: { name: "设置黄金", elem: ["number"], tips: ["数量"] }, totalRecharged: { name: "设置累积充值黄金", elem: ["number"], tips: ["数量"] }, anniCoin: { name: "设置纪念币", elem: ["number"], tips: ["数量"] }, tenCoin: { name: "设置十年币", elem: ["number"], tips: ["数量"] }, partsC: { name: "设置零件券", elem: ["number"], tips: ["数量"] }, guihua25: { name: "设置桂花糕", elem: ["number"], tips: ["数量"] } } }, save: { name: "存档", method: { readSave: { name: "载入指定存档", elem: ["string"], tips: ["UID,索引(0-7)"] }, zuobiReason: "查询作弊原因", create_time: { name: "设置建档时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] }, update_times: { name: "设置存档次数", elem: ["number"], tips: ["次数"] }, uidMd5: "过存档MD5检测", closeZuobiPanB: "开启/关闭作弊判断", get4399Save: "复制XML存档数据", getSaveData: "复制JSON存档数据" } }, skill: { name: "技能", method: { study: { name: "学习指定技能", elem: ["string"], tips: ["技能名"] }, remove: "删除指定技能", lv: { name: "设置技能等级", elem: ["number"], tips: ["等级"] }, dayProfi: { name: "今日获取熟练度", elem: ["number"], tips: ["熟练度"] }, profi: { name: "累计获取熟练度", elem: ["number"], tips: ["熟练度"] } } }, space: { name: "太空", method: { diff: { name: "解锁地图难度", elem: ["string", "number"], tips: ["地图名", "难度"] }, win: { name: "累计通关次数", elem: ["string", "number"], tips: ["地图名", "次数"] }, exp: { name: "本周获取经验", elem: ["string", "number"], tips: ["地图名", "经验值"] }, shieldKill: { name: "无敌护盾击杀", elem: ["number"], tips: ["数量"] }, screenKill: { name: "全域光波击杀", elem: ["number"], tips: ["数量"] }, screenKillB: { name: "全域光波击杀首领", elem: ["number"], tips: ["数量"] }, setLevel: { name: "设置飞船等级", elem: ["number"], tips: ["等级"] }, addExp: { name: "添加飞船经验", elem: ["number"], tips: ["经验值"] }, setPoint: { name: "设置飞船技能加点", elem: ["string", "number"], tips: ["技能名", "加点"] } } }, food: { name: "美食", method: { addRaw: { name: "添加指定食材", elem: ["string", "number"], tips: ["食材名", "数量"] }, addBook: { name: "添加指定美食", elem: ["string", "number"], tips: ["美食名", "数量"] }, addRawAll: { name: "添加所有食材", elem: ["number"], tips: ["数量"] }, profiAll: { name: "设置总厨艺值", elem: ["number"], tips: ["厨艺值"] }, eat: { name: "食用指定美食", elem: ["string"], tips: ["美食名"] }, clear_eat: "取消今日进食", eatTime: { name: "设置消化时间", elem: ["number"], tips: ["秒"] }, eatNum: { name: "设置今日进食次数", elem: ["number"], tips: ["次数"] }, dropAll: { name: "设置食物掉落总数", elem: ["number"], tips: ["次数"] }, eatAll: { name: "设置食物进食累计", elem: ["number"], tips: ["次数"] } } }, bossCard: { name: "魂卡", method: { add: { name: "添加魂卡", elem: ["string", "number"], tips: ["魂卡名", "星级"] }, remove: "删除魂卡", n: { name: "设置代码", elem: ["string"], tips: ["代码"] }, s: { name: "设置星级", elem: ["number"], tips: ["星级"] }, li: { name: "设置生命系数", elem: ["number"], tips: ["数值"] }, dp: { name: "设置伤害系数", elem: ["number"], tips: ["数值"] }, lk: { name: "是否锁住", elem: ["number"], tips: ["布尔值(1/0)"] }, o: { name: "设置魂卡属性", elem: ["string", "number"], tips: ["属性", "数值"] }, addSkill: { name: "添加指定后天技能", elem: ["string"], tips: ["技能名"] }, deleteSkill: { name: "删除指定后天技能", elem: ["string"], tips: ["技能名"] }, sr: { name: "设置后天技能", elem: ["string"], tips: ["技能名,技能名..."] }, num: { name: "普通已抽次数", elem: ["number"], tips: ["次数"] }, hNum: { name: "高级已抽次数", elem: ["number"], tips: ["次数"] }, s7N: { name: "7星已抽次数", elem: ["number"], tips: ["次数"] }, t: { name: "今日剩余出战时间", elem: ["number"], tips: ["秒"] }, v: { name: "普通关卡取胜", elem: ["number"], tips: ["次数"] }, demV: { name: "修罗及星谷地图取胜", elem: ["number"], tips: ["次数"] }, autoDown: "开启/关闭自动退卡", pkWin: { name: "设置魂卡PK击败魂卡累计", elem: ["number"], tips: ["数量"] }, pkWinStar: { name: "设置魂卡PK获得抽卡次数", elem: ["number"], tips: ["次数"] }, pkStone: { name: "设置魂卡PK获得聚魂石累计", elem: ["number"], tips: ["数量"] } } }, task: { name: "任务", method: { unlockAllByType: { name: "解锁所有任务", elem: ["string"], tips: ["类型"] }, getAllByType: { name: "接取所有任务", elem: ["string"], tips: ["类型"] }, completeAllByType: { name: "完成所有任务", elem: ["string"], tips: ["类型"] }, getGiftAll: "领取已完成任务奖励" } }, buff: { name: "Buff", method: { addBuff: { name: "添加Buff", elem: ["string"], tips: ["道具名"] }, doubleExpTime: { name: "双倍经验时间", elem: ["number"], tips: ["秒"] }, doubleMaterialsDropTime: { name: "双倍材料掉落", elem: ["number"], tips: ["秒"] }, doubleArmsDropTime: { name: "双倍武器掉率", elem: ["number"], tips: ["秒"] }, doubleEquipDropTime: { name: "双倍装备掉率", elem: ["number"], tips: ["秒"] }, clearAllTime: "清除所有双倍时间" } }, pet: { name: "尸宠", method: { add: { name: "添加尸宠", elem: ["string"], tips: ["尸宠名"] }, remove: "删除尸宠", playerName: { name: "设置昵称", elem: ["string"], tips: ["昵称"] }, level: { name: "设置等级", elem: ["number"], tips: ["等级"] }, exp: { name: "设置经验", elem: ["number"], tips: ["经验值"] }, color: { name: "设置品质", elem: ["string"], tips: ["品质"] }, dpsAdd: { name: "设置战斗力强化", elem: ["number"], tips: ["等级"] }, lifeAdd: { name: "设置生命力强化", elem: ["number"], tips: ["等级"] }, headAdd: { name: "设置头部防御强化", elem: ["number"], tips: ["等级"] }, fightB: "开启/关闭出战", suppleB: "开启/关闭替补", obj: { name: "设置资质属性", elem: ["string", "number"], tips: ["属性", "数值"] }, growObj: { name: "设置资质培养属性", elem: ["string", "number"], tips: ["属性", "数值"] }, study: { name: "学习指定尸宠技能", elem: ["string"], tips: ["技能名"] }, skillLv: { name: "设置尸宠技能等级", elem: ["string", "number"], tips: ["技能名", "等级"] }, limitDps: "设置极限战力属性" } }, arms: { name: "武器", method: { add: { name: "添加武器", elem: ["string"], tips: ["武器名,品质"] }, remove: "删除武器", cnName: { name: "设置名称", elem: ["string"], tips: ["武器名"] }, name: { name: "设置代码", elem: ["string"], tips: ["代码"] }, color: { name: "设置品质", elem: ["string"], tips: ["品质"] }, itemsLevel: { name: "设置基础等级", elem: ["number"], tips: ["等级"] }, addLevel: { name: "设置升级次数", elem: ["number"], tips: ["次数"] }, strengthenLv: { name: "设置强化等级", elem: ["number"], tips: ["等级"] }, evoLv: { name: "设置进阶等级", elem: ["number"], tips: ["等级"] }, ele: { name: "设置元素类型", elem: ["string"], tips: ["类型"] }, eleLv: { name: "设置元素等级", elem: ["number"], tips: ["等级"] }, critD_mul: { name: "设置暴击倍数", elem: ["number"], tips: ["倍数"] }, critD_pro: { name: "设置暴击概率", elem: ["number"], tips: ["概率(%)"] }, hurtRatio: { name: "设置单发伤害", elem: ["number"], tips: ["伤害"] }, capacity: { name: "设置弹容量", elem: ["number"], tips: ["弹容量"] }, reloadGap: { name: "设置装弹时间", elem: ["number"], tips: ["秒"] }, attackGap: { name: "设置射击间隔", elem: ["number"], tips: ["秒"] }, bulletNum: { name: "设置散射子弹数", elem: ["number"], tips: ["数量"] }, shootAngle: { name: "设置散射角度", elem: ["number"], tips: ["角度"] }, shakeAngle: { name: "设置抖动角度", elem: ["number"], tips: ["角度"] }, twoShootPro: { name: "设置瞬间连发概率", elem: ["number"], tips: ["概率(%)"] }, armsImgLabelem: { name: "设置图像模型", elem: ["string"], tips: ["代码"] }, shootSoundUrl: { name: "设置射击音效", elem: ["string"], tips: ["Url"] }, bulletWidth: { name: "设置碰撞宽度", elem: ["number"], tips: ["宽度"] }, bulletShakeWidth: { name: "设置射程随机数", elem: ["number"], tips: ["数值"] }, followD_value: { name: "设置跟踪系数", elem: ["number"], tips: ["系数"] }, followD_delay: { name: "设置跟踪延迟", elem: ["number"], tips: ["秒"] }, followD_maxTime: { name: "设置跟踪最大时间", elem: ["number"], tips: ["秒"] }, followD_hitIsTargetB: { name: "是否跟踪碰到的目标", elem: ["number"], tips: ["布尔值(1/0)"] }, penetrationNum: { name: "设置穿人个数", elem: ["number"], tips: ["数量"] }, penetrationGap: { name: "设置穿墙深度", elem: ["number"], tips: ["深度"] }, bounceD_floor: { name: "设置地面反弹次数", elem: ["number"], tips: ["次数"] }, bounceD_body: { name: "设置击中反弹次数", elem: ["number"], tips: ["次数"] }, bounceD_vMul: { name: "设置反弹速度系数", elem: ["number"], tips: ["系数"] }, bounceD_liveInitB: { name: "是否反弹后恢复寿命", elem: ["number"], tips: ["布尔值(1/0)"] }, bounceD_glueFloorB: { name: "是否黏在地面", elem: ["number"], tips: ["布尔值(1/0)"] }, bounceD_hurtNumAdd: { name: "设置反弹伤害比例", elem: ["number"], tips: ["比例(%)"] }, bounceD_noHitTime: { name: "设置反弹后不碰撞时间", elem: ["number"], tips: ["秒"] }, bounceD_noDieB: { name: "是否碰到后子弹不消失", elem: ["number"], tips: ["布尔值(1/0)"] }, lockB: { name: "是否锁住", elem: ["number"], tips: ["布尔值(1/0)"] }, firstChoiceB: { name: "是否首选", elem: ["number"], tips: ["布尔值(1/0)"] }, newB: { name: "是否崭新", elem: ["number"], tips: ["布尔值(1/0)"] }, evo: "进阶武器", strengthen: "强化武器", evoMax: "进阶至最高等级", strengthenMax: "强化至最高等级", getTime: { name: "设置武器获取时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] }, inHouseTime: { name: "设置仓库储存时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] }, addSkill: { name: "添加指定技能", elem: ["string"], tips: ["技能名"] }, deleteSkill: { name: "删除指定技能", elem: ["string"], tips: ["技能名"] }, skillArr: { name: "设置普通技能", elem: ["string"], tips: ["技能名,技能名..."] }, addGodSkill: { name: "添加指定神级技能", elem: ["string"], tips: ["技能名"] }, deleteGodSkill: { name: "删除指定神级技能", elem: ["string"], tips: ["技能名"] }, godSkillArr: { name: "设置神级技能", elem: ["string"], tips: ["技能名,技能名..."] } } }, equip: { name: "装备", method: { add: { name: "添加装备", elem: ["string"], tips: ["装备名,品质"] }, remove: "删除装备", name: { name: "设置代码", elem: ["string"], tips: ["代码"] }, imgName: { name: "设置图片", elem: ["string"], tips: ["代码"] }, color: { name: "设置品质", elem: ["string"], tips: ["品质"] }, itemsLevel: { name: "设置基础等级", elem: ["number"], tips: ["等级"] }, addLevel: { name: "设置升级次数", elem: ["number"], tips: ["次数"] }, strengthenLv: { name: "设置强化等级", elem: ["number"], tips: ["等级"] }, partType: { name: "设置装备类型", elem: ["string"], tips: ["类型"] }, lockB: { name: "是否锁住", elem: ["number"], tips: ["布尔值(1/0)"] }, newB: { name: "是否崭新", elem: ["number"], tips: ["布尔值(1/0)"] }, evo: "进阶装备", strengthen: "强化装备", evoMax: "进阶至最高等级", strengthenMax: "强化至最高等级", obj: { name: "设置装备属性", elem: ["string", "number"], tips: ["属性", "数值"] }, heroSkillAddObj: { name: "设置技能附加属性", elem: ["string", "number"], tips: ["属性", "数值"] }, addSkill: { name: "添加指定装备技能", elem: ["string"], tips: ["技能名"] }, deleteSkill: { name: "删除指定装备技能", elem: ["string"], tips: ["技能名"] }, skillArr: { name: "设置装备技能", elem: ["string"], tips: ["技能名,技能名..."] }, getTime: { name: "设置装备获取时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] }, inHouseTime: { name: "设置仓库储存时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] } } }, fashion: { name: "时装", method: { add: { name: "添加时装", elem: ["string"], tips: ["时装名"] }, remove: "删除时装", name: { name: "设置代码", elem: ["string"], tips: ["代码"] }, imgName: { name: "设置图片", elem: ["string"], tips: ["代码"] }, color: { name: "设置品质", elem: ["string"], tips: ["品质"] }, itemsLevel: { name: "设置基础等级", elem: ["number"], tips: ["等级"] }, addLevel: { name: "设置升级次数", elem: ["number"], tips: ["次数"] }, strengthenLv: { name: "设置强化等级", elem: ["number"], tips: ["等级"] }, lockB: { name: "是否锁住", elem: ["number"], tips: ["布尔值(1/0)"] }, newB: { name: "是否崭新", elem: ["number"], tips: ["布尔值(1/0)"] }, obj: { name: "设置时装属性", elem: ["string", "number"], tips: ["属性", "数值"] }, heroSkillAddObj: { name: "设置技能附加属性", elem: ["string", "number"], tips: ["属性", "数值"] }, addSkill: { name: "添加指定时装技能", elem: ["string"], tips: ["技能名"] }, deleteSkill: { name: "删除指定时装技能", elem: ["string"], tips: ["技能名"] }, skillArr: { name: "设置时装技能", elem: ["string"], tips: ["技能名,技能名..."] }, getTime: { name: "设置时装获取时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] }, inHouseTime: { name: "设置仓库储存时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] } } }, things: { name: "物品", method: { add: { name: "添加指定物品", elem: ["string", "number"], tips: ["物品名", "数量"] }, addAllThings: { name: "添加所有物品", elem: ["number"], tips: ["数量"] }, remove: { name: "删除指定物品", elem: ["string"], tips: ["物品名"] }, removeAll: "删除所有物品", nowNum: { name: "设置指定物品数量", elem: ["string", "number"], tips: ["物品名", "数量"] }, allNowNum: { name: "设置所有物品数量", elem: ["number"], tips: ["数量"] } } }, gene: { name: "基因", method: { add: { name: "添加基因体", elem: ["string"], tips: ["基因体,品质"] }, remove: "删除基因体", name: { name: "设置代码", elem: ["string"], tips: ["代码"] }, color: { name: "设置品质", elem: ["string"], tips: ["品质"] }, itemsLevel: { name: "设置基础等级", elem: ["number"], tips: ["等级"] }, addLevel: { name: "设置升级次数", elem: ["number"], tips: ["次数"] }, lockB: { name: "是否锁住", elem: ["number"], tips: ["布尔值(1/0)"] }, obj: { name: "设置资质属性", elem: ["string", "number"], tips: ["属性", "数值"] }, addTalentSkill: { name: "添加指定天赋技能", elem: ["string"], tips: ["技能名"] }, deleteTalentSkill: { name: "删除指定天赋技能", elem: ["string"], tips: ["技能名"] }, talentSkillArr: { name: "设置天赋技能", elem: ["string"], tips: ["技能名,技能名..."] }, addLaterSkill: { name: "添加指定后天技能", elem: ["string"], tips: ["技能名"] }, deleteLaterSkill: { name: "删除指定后天技能", elem: ["string"], tips: ["技能名"] }, laterSkillArr: { name: "设置后天技能", elem: ["string"], tips: ["技能名,技能名..."] } } }, parts: { name: "零件", method: { add: { name: "添加指定零件", elem: ["string", "number"], tips: ["零件名", "数量"] }, addAllParts: { name: "添加所有零件", elem: ["number"], tips: ["数量"] }, remove: { name: "删除指定零件", elem: ["string"], tips: ["零件名"] }, removeAll: "删除所有零件", nowNum: { name: "设置指定零件数量", elem: ["string", "number"], tips: ["零件名", "数量"] }, allNowNum: { name: "设置所有零件数量", elem: ["number"], tips: ["数量"] } } }, vehicle: { name: "载具", method: { add: { name: "添加载具", elem: ["string"], tips: ["载具名"] }, remove: "删除载具", name: { name: "设置代码", elem: ["string"], tips: ["代码"] }, imgName: { name: "设置图片", elem: ["string"], tips: ["代码"] }, itemsLevel: { name: "设置基础等级", elem: ["number"], tips: ["等级"] }, addLevel: { name: "设置升级次数", elem: ["number"], tips: ["次数"] }, lockB: { name: "是否锁住", elem: ["number"], tips: ["布尔值(1/0)"] }, newB: { name: "是否崭新", elem: ["number"], tips: ["布尔值(1/0)"] }, evo: "进阶载具", mainMulAddLv: { name: "设置主炮攻击强化", elem: ["number"], tips: ["等级"] }, subMulAddLv: { name: "设置机枪攻击强化", elem: ["number"], tips: ["等级"] }, attackMulAddLv: { name: "设置碾压攻击强化", elem: ["number"], tips: ["等级"] }, lifeMulAddLv: { name: "设置耐久系数强化", elem: ["number"], tips: ["等级"] }, upLv: { name: "设置载具提升等级", elem: ["number"], tips: ["等级"] }, study: { name: "学习指定载具技能", elem: ["string"], tips: ["技能名"] }, skillLv: { name: "设置载具技能等级", elem: ["string", "number"], tips: ["技能名", "等级"] }, getTime: { name: "设置载具获取时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] }, inHouseTime: { name: "设置仓库储存时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] } } }, jewelry: { name: "饰品", method: { add: { name: "添加饰品", elem: ["string", "number"], tips: ["饰品名,等级", "数量"] }, remove: "删除饰品", name: { name: "设置代码", elem: ["string"], tips: ["代码"] }, imgName: { name: "设置图片", elem: ["string"], tips: ["代码"] }, itemsLevel: { name: "设置基础等级", elem: ["number"], tips: ["等级"] }, addLevel: { name: "设置升级次数", elem: ["number"], tips: ["次数"] }, strengthenLv: { name: "设置强化等级", elem: ["number"], tips: ["等级"] }, lockB: { name: "是否锁住", elem: ["number"], tips: ["布尔值(1/0)"] }, newB: { name: "是否崭新", elem: ["number"], tips: ["布尔值(1/0)"] }, evo: "进阶饰品", getTime: { name: "设置饰品获取时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] }, inHouseTime: { name: "设置仓库储存时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] } } }, shield: { name: "护盾", method: { add: { name: "添加护盾", elem: ["string", "number"], tips: ["护盾名,等级", "数量"] }, remove: "删除护盾", name: { name: "设置代码", elem: ["string"], tips: ["代码"] }, imgName: { name: "设置图片", elem: ["string"], tips: ["代码"] }, itemsLevel: { name: "设置基础等级", elem: ["number"], tips: ["等级"] }, addLevel: { name: "设置升级次数", elem: ["number"], tips: ["次数"] }, strengthenLv: { name: "设置强化等级", elem: ["number"], tips: ["等级"] }, lockB: { name: "是否锁住", elem: ["number"], tips: ["布尔值(1/0)"] }, newB: { name: "是否崭新", elem: ["number"], tips: ["布尔值(1/0)"] }, evo: "进阶护盾", getTime: { name: "设置护盾获取时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] }, inHouseTime: { name: "设置仓库储存时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] } } }, weapon: { name: "副手", method: { add: { name: "添加副手", elem: ["string", "number"], tips: ["副手名,等级", "数量"] }, remove: "删除副手", name: { name: "设置代码", elem: ["string"], tips: ["代码"] }, imgName: { name: "设置图片", elem: ["string"], tips: ["代码"] }, itemsLevel: { name: "设置基础等级", elem: ["number"], tips: ["等级"] }, addLevel: { name: "设置升级次数", elem: ["number"], tips: ["次数"] }, strengthenLv: { name: "设置强化等级", elem: ["number"], tips: ["等级"] }, lockB: { name: "是否锁住", elem: ["number"], tips: ["布尔值(1/0)"] }, newB: { name: "是否崭新", elem: ["number"], tips: ["布尔值(1/0)"] }, evo: "进阶副手", getTime: { name: "设置副手获取时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] }, inHouseTime: { name: "设置仓库储存时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] } } }, device: { name: "装置", method: { add: { name: "添加装置", elem: ["string", "number"], tips: ["装置名,等级", "数量"] }, remove: "删除装置", name: { name: "设置代码", elem: ["string"], tips: ["代码"] }, imgName: { name: "设置图片", elem: ["string"], tips: ["代码"] }, itemsLevel: { name: "设置基础等级", elem: ["number"], tips: ["等级"] }, addLevel: { name: "设置升级次数", elem: ["number"], tips: ["次数"] }, strengthenLv: { name: "设置强化等级", elem: ["number"], tips: ["等级"] }, lockB: { name: "是否锁住", elem: ["number"], tips: ["布尔值(1/0)"] }, newB: { name: "是否崭新", elem: ["number"], tips: ["布尔值(1/0)"] }, evo: "进阶装置", getTime: { name: "设置装置获取时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] }, inHouseTime: { name: "设置仓库储存时间", elem: ["string"], tips: ["yyyy-MM-dd hh:mm:ss"] } } }, peak: { name: "巅峰", method: { lv: { name: "设置巅峰等级", elem: ["number"], tips: ["等级"] }, exp: { name: "设置巅峰经验", elem: ["number"], tips: ["经验值"] }, dayExp: { name: "设置今日转化经验", elem: ["number"], tips: ["经验值"] }, dpN: { name: "设置累计提升次数", elem: ["number"], tips: ["次数"] }, dpDay: { name: "设置今日提升次数", elem: ["number"], tips: ["次数"] }, pointObj: { name: "设置巅峰方案属性", elem: ["string", "number"], tips: ["方案(1-3),属性", "数值"] } } }, head: { name: "称号", method: { add: { name: "添加指定称号", elem: ["string"], tips: ["称号名"] }, addAllHead: "添加所有称号", remove: { name: "删除指定称号", elem: ["string"], tips: ["称号名"] }, removeAll: "删除所有称号" } }, achieve: { name: "勋章", method: { complete: { name: "解锁指定勋章", elem: ["string"], tips: ["勋章名"] }, completeAllAchieve: "解锁所有勋章", remove: { name: "删除指定勋章", elem: ["string"], tips: ["勋章名"] }, removeAll: "删除所有勋章" } }, union: { name: "军队", method: { lv: { name: "设置指定建筑等级", elem: ["string", "number"], tips: ["建筑名", "等级"] }, copyCurUnionMemberData: "复制当前军队成员数据", copyOneUnionMemberData: { name: "复制指定军队成员数据", elem: ["number"], tips: ["军队ID"] } } }, city: { name: "冶炼", method: { allNum: { name: "设置熔炼总次数", elem: ["number"], tips: ["次数"] } } }, vip: { name: "VIP", method: { pay: { name: "模拟充值", elem: ["number"], tips: ["黄金数量"] }, level: { name: "设置VIP等级记录", elem: ["number"], tips: ["等级"] }, obj: { name: "设置VIP等级礼包领取记录", elem: ["string", "number"], tips: ["等级", "布尔值(1/0)"] }, dayObj: { name: "设置VIP每日礼包领取记录", elem: ["string", "number"], tips: ["等级", "布尔值(1/0)"] }, upLevelObj: { name: "设置VIP等级累充升级记录", elem: ["string", "number"], tips: ["等级", "布尔值(1/0)"] }, nO: { name: "设置VIP等级累充升级记录New", elem: ["string", "number"], tips: ["等级", "布尔值(1/0)"] }, vipZuobiPan: "解除VIP作弊记录" } }, tower: { name: "虚天塔", method: { winOne: { name: "通关指定幻塔层数", elem: ["string", "number"], tips: ["层数", "难度(1-4)"] }, winAll: { name: "通关所有幻塔层数", elem: ["number"], tips: ["难度(1-4)"] }, getGiftAll: "领取已通关幻塔奖励", unendLv: { name: "设置天塔通关最高层", elem: ["number"], tips: ["层数"] }, pointObj: { name: "设置虚天塔方案属性", elem: ["string", "number"], tips: ["方案(1-3),属性", "数值"] } } }, define: { name: "定义查询", method: { equip: "装备", things: "物品", skill: "技能" } } } } },
+                init() {
+                    const app = document.querySelector("#app");
+                    if (isIE()) {
+                        message.show("初始化错误", "请切换至其他浏览器");
+                        return;
+                    };
+                    const main = app.querySelector("#cheat-group");
+                    const groups = main.querySelectorAll(".param-group");
+                    for (let idx = 0; idx < groups.length; idx++) {
+                        const group = groups[idx];
+                        if (group) {
+                            const type = group.getAttribute("type");
+                            const params = group.querySelectorAll(".param");
+                            for (let __idx = 0; __idx < params.length; __idx++) {
+                                const param = params[__idx];
+                                if (param) {
+                                    const __class = param.classList;
+                                    const __name = param.getAttribute("name");
+                                    if (__class.contains("edit-box")) {
+                                        this.addItem(type, __name, new editBox(param));
+                                    } else if (__class.contains("select-box")) {
+                                        this.addItem(type, __name, new selectBox(param));
+                                    };
+                                };
+                            };
+                            const cloned = template.get("changeBtn");
+                            cloned.setAttribute("type", type);
+                            cloned.addEventListener("click", (e) => {
+                                const target = e.currentTarget;
+                                const type = target.getAttribute("type");
+                                if (type && this.component.hasOwnProperty(type)) this.change(type);
+                            });
+                            group.appendChild(cloned);
+                        };
+                    };
+                    new sliderBox(main, groups.length - 1, 0, (idx, view) => {
+                        groups.forEach((group, __idx) => {
+                            const stl = group.style;
+                            if (idx === __idx) {
+                                const type = group.getAttribute("type");
+                                if (this.define.hasOwnProperty(type)) {
+                                    this.type = type;
+                                    this.curdef = this.define[type];
+                                    view.textContent = this.curdef.name;
+                                    const select = this.getSelectBox(true);
+                                    if (select.__valid) select.updateItems(this.curdef.type);
+                                };
+                                stl.display = "";
+                            } else {
+                                stl.display = "none";
+                            };
+                        });
+                    }, false);
+                    document.addEventListener("contextmenu", (e) => e.preventDefault());
+                    this.init = null;
+                },
+                change(type) {
+                    let data = "#cheating?mode='" + type + "'";
+                    const params = this.component[type];
+                    for (const key in params) {
+                        const param = params[key];
+                        data += ("&" + key + "=" + param.get());
+                    };
+                    call(data);
+                },
+                addItem(type, name, comp) {
+                    if (typeof (comp) !== "object") return;
+                    if (comp.hasOwnProperty("__valid") && comp.__valid) {
+                        const comps = this.component;
+                        if (!comps.hasOwnProperty(type)) comps[type] = {};
+                        comps[type][name] = comp;
+                    };
+                },
+                getAllItems() {
+                    const compArr = [];
+                    const comps = this.component[this.type];
+                    for (const param in comps) {
+                        const comp = comps[param];
+                        compArr.push(comp);
+                    };
+                    return compArr;
+                },
+                getEditBox() {
+                    const comps = this.getAllItems();
+                    return comps.filter((comp) => comp.constructor.name === "editBox");
+                },
+                getSelectBox(parent) {
+                    const comps = this.getAllItems();
+                    const filter = comps.filter((comp) => comp.__parent === parent);
+                    if (filter.length > 0) return filter[0];
+                    return null;
+                }
+            };
+            project.init();
+        })(window);
+    </script>
+</body>
+</html>
