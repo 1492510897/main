@@ -1636,6 +1636,9 @@ class AppDetector:
 
         uid_indexes = sorted({it['theory'] for it in items if it['theory'] != '无'})
         total_cost = sum(it['cost'] for it in items)
+        # 账号合并消费：同一 UID 下全部存档（含未异常存档）消费之和
+        uid_total_cost = max(it.get('uid_cost', it['cost']) for it in items)
+        uid_file_count = max(it.get('uid_file_count', 1) for it in items)
         uid_status = 'FAIL' if any(it['status'] == 'fail' for it in items) else 'WARN'
         mismatch_items = [it for it in items if it['index_mismatch']]
 
@@ -1647,7 +1650,8 @@ class AppDetector:
                  f"📁 UID_Index：{', '.join(uid_indexes) if uid_indexes else '无'}",
                  f"📂 异常存档数：{len(items)} 个",
                  f"🔍 检测结果：{uid_status}",
-                 f"💰 消费金额(该UID异常存档合计)：{total_cost}",
+                 f"💰 账号合并消费(该UID全部 {uid_file_count} 个存档)：{uid_total_cost}",
+                 f"💰 异常存档消费合计：{total_cost}",
                  "📄 涉及文件：" + "、".join(it['fname'] for it in items),
                  ""]
 
@@ -1668,7 +1672,7 @@ class AppDetector:
             lines.append(f"📄 实际UID_Index：{it['actual']}")
             if it['name']:
                 lines.append(f"📛 Name：{it['name']}")
-            lines.append(f"💰 消费金额：{it['cost']}")
+            lines.append(f"💰 本存档消费：{it['cost']}（该UID账号合并消费：{uid_total_cost}）")
             lines.append(f"🔍 检测结果：{it['status'].upper()}")
             if it['index_mismatch']:
                 lines.append(f"🔢 index 异常：{it['index_tag']}")
@@ -1737,35 +1741,44 @@ class AppDetector:
         if uid_max_vip:
             self.log(f"👑 账号最高VIP预扫描完成：{len(uid_max_vip)} 个 UID", "INFO")
 
-        # 按 UID 累计消费（同一账号多个存档共享）
-        uid_total_cost = defaultdict(int)
-        success = warn = fail = 0
         file_result_map = {}
 
         with ThreadPoolExecutor(max_workers=thread_count) as executor:
             future_to_file = {}
             for fp in file_list:
                 future = executor.submit(self._detect_single_file_batch, fp, bin_path,
-                                         max_details, min_money, min_num, export_full,
-                                         uid_total_cost, uid_max_vip)
+                                         max_details, min_money, min_num, export_full)
                 future_to_file[future] = fp
 
             for future in as_completed(future_to_file):
                 fp = future_to_file[future]
                 try:
-                    res = future.result()
-                    file_result_map[fp] = res
-                    if res['overall'] == 'fail':
-                        fail += 1
-                    elif res['overall'] == 'warn':
-                        warn += 1
-                    else:
-                        success += 1
-                    self.log(f"文件:{os.path.basename(fp)} | UID:{res.get('uid','')} | 状态:{res['overall'].upper()}",
-                             res['overall'].upper())
+                    file_result_map[fp] = future.result()
                 except Exception as e:
                     self.log(f"❌ 处理失败：{fp} | {str(e)}", "FAIL")
-                    fail += 1
+
+        # 全部存档解析完成后，再按账号（同一 UID）合并各存档消费统计，
+        # 并用合并值统一做 VIP 联合检测。
+        # 注意：不能在线程内累加 —— 线程只处理单个存档，读到的是“部分累计值”，
+        # 会把同一账号的消费拆散，且结果随线程调度变化。
+        uid_total_cost = self._finalize_batch_results(file_result_map, uid_max_vip)
+        self.log(f"💰 消费按UID合并统计完成：{len(uid_total_cost)} 个账号", "INFO")
+
+        # 联合检测可能改变 overall，按最终结果统计并输出逐文件日志
+        success = warn = fail = 0
+        for fp in file_list:
+            res = file_result_map.get(fp)
+            if not res:
+                fail += 1
+                continue
+            if res['overall'] == 'fail':
+                fail += 1
+            elif res['overall'] == 'warn':
+                warn += 1
+            else:
+                success += 1
+            self.log(f"文件:{os.path.basename(fp)} | UID:{res.get('uid','')} | 状态:{res['overall'].upper()}",
+                     res['overall'].upper())
 
         self.log("📝 开始生成异常详情文件...", "INFO")
         abnormal_report = []          # 用于 CSV 的行（按 UID 汇总）
@@ -1802,6 +1815,8 @@ class AppDetector:
                 'theory': file_uid_index or '无',
                 'actual': inner_uid_index or '无',
                 'cost': res.get('total_cost', 0),
+                'uid_cost': res.get('uid_total_cost', res.get('total_cost', 0)),
+                'uid_file_count': res.get('uid_file_count', 1),
                 'status': file_status,
                 'reason': file_reason,
                 'index_mismatch': index_mismatch,
@@ -1844,9 +1859,60 @@ class AppDetector:
         self._generate_batch_report(abnormal_report, success, warn, fail, total)
         self.log(f"批量检测结束\n✅ 通过:{success} ⚠️ 警告:{warn} ❌ 异常:{fail} | 总计:{total}", "PASS")
 
+    def _finalize_batch_results(self, file_result_map, uid_max_vip=None):
+        """按账号（同一 UID）合并消费统计并完成 VIP 联合检测。
+
+        必须在全部存档并行检测结束后、汇总报告前调用：同一账号下所有存档的消费
+        累加为账号总消费，该账号的每个存档都用同一个合并值做联合判断，
+        保证结果与文件处理顺序/线程调度无关。
+
+        返回 {cost_key: 账号合并消费}。
+        """
+        uid_total_cost = defaultdict(int)
+        uid_file_count = defaultdict(int)
+        for res in file_result_map.values():
+            key = res.get('cost_key')
+            if not key:
+                continue
+            uid_total_cost[key] += res.get('total_cost', 0) or 0
+            uid_file_count[key] += 1
+
+        for res in file_result_map.values():
+            key = res.get('cost_key')
+            if not key:
+                continue
+            merged_cost = uid_total_cost[key]
+            # 联合判断使用该账号下最高 VIP（预扫描未命中则回退当前文件自身 VIP）
+            best_vip = (uid_max_vip or {}).get(key)
+            union_res = DetectionEngine.check_vip_pay_union(file_path=res['file'],
+                                                            pay_cost=merged_cost,
+                                                            vip_level_override=best_vip)
+
+            # 联合结果插回消费检测之后
+            results = []
+            inserted = False
+            for item in res['results']:
+                results.append(item)
+                if isinstance(item, dict) and item.get('title') == '金币消费检测':
+                    results.append(union_res)
+                    inserted = True
+            if not inserted:
+                results.append(union_res)
+
+            res['results'] = results
+            res['overall'] = AppDetector._overall_of(results)
+            res['union_res'] = union_res
+            res['uid_total_cost'] = merged_cost
+            res['uid_file_count'] = uid_file_count[key]
+        return dict(uid_total_cost)
+
     def _detect_single_file_batch(self, file_path, bin_path, max_details, min_money, min_num,
-                                  export_full, uid_total_cost, uid_max_vip=None):
-        """批量单文件检测（线程内执行）。"""
+                                  export_full):
+        """批量单文件检测（线程内执行）：只检测该存档自身。
+
+        消费不在此处累计、也不做 VIP 联合检测 —— 同一 UID 的消费必须等全部存档
+        解析完成后由 _finalize_batch_results 合并统计。
+        """
         fname = os.path.basename(file_path)
 
         uid_res = DetectionEngine.check_uid_md5_advanced(file_path)
@@ -1882,27 +1948,22 @@ class AppDetector:
             uid_res_checked['msg'] = (f"❌ 【异常：UID 不匹配】\n文件名UID:{server_uid}\n数据UID:{inner_uid}\n"
                                       + (uid_res.get('msg') or ''))
 
-        # 消费累计 key：优先用文件名 uid（服务器uid），其次 inner_uid
-        cost_key = str(server_uid or inner_uid or 'unknown')
+        # 消费累计 key：优先用文件名 uid（服务器uid），其次文件内 uid
+        # 兜底用文件路径而不是固定字符串，避免把不同账号混成同一个
+        cost_key = str(server_uid or inner_uid or file_path)
         pay_res = DetectionEngine.check_pay_xml(file_path, bin_path, max_details,
                                                 min_money, min_num, export_full)
         current_cost = pay_res.get('total_cost', 0)
-        uid_total_cost[cost_key] += current_cost
-        total_cost_all = uid_total_cost[cost_key]
 
         cheat_res = DetectionEngine.check_cheat_stream(file_path)
         vip_res = DetectionEngine.check_vip_xml(file_path)
-        # 联合判断使用该账号(文件名UID)下最高 VIP；预扫描未命中则回退当前文件自身 VIP
-        uid_best_vip = (uid_max_vip or {}).get(cost_key, None)
-        union_res = DetectionEngine.check_vip_pay_union(file_path, total_cost_all,
-                                                        vip_level_override=uid_best_vip)
 
-        results = [ban_result] + [uid_res_checked] + cheat_res['details'] + \
-                  [vip_res, pay_res, union_res]
+        results = [ban_result] + [uid_res_checked] + cheat_res['details'] + [vip_res, pay_res]
         overall = AppDetector._overall_of(results)
 
         return {
             'file': file_path,
+            'cost_key': cost_key,
             'uid': server_uid or inner_uid or '',
             'overall': overall,
             'results': results,

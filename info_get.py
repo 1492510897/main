@@ -1,11 +1,18 @@
 """
-info_get (γ 合并版) v3.1.0
+info_get (γ 合并版) v3.2.0
 爆枪突击存档下载工具 —— 融合 α(info_get5) 与 β(info_get_v2)
 
 功能整合：
   • 单UID整账号下载(1~8槽)、账号转UID、导入 uid/uid,index 任务文件批量整账号下载、
-    批量文件夹导入(多任务文件)、停止下载、分批暂停防封、失败槽位重试、存档封禁状态列
+    批量文件夹导入(多任务文件)、停止下载、申请节流防封、失败槽位重试、存档封禁状态列
   • 按 config.ini 的 work_dir 组织输出目录、任务文件按文件名分文件夹、进度条
+
+服务器响应判定(v3.2.0)：
+  • 返回 0（或空对象） → 未创建存档，正常现象（不计失败、不重试）
+  • 返回空响应          → 申请过快，服务器拒绝访问（标记后交由节流/重试处理）
+  • 返回 dict 带 data   → 正常存档；status=1/2 → 临时/永久封禁
+
+申请节流(v3.2.0)：每申请 200 个存档（槽位）暂停 30 秒，暂停期间不发出新申请
 
 批量下载说明(v3.1.0 起统一为整账号下载，等同“指定UID下载”)：
   • 任务行  uid        (新模式) → 下载该账号全部 1~8 槽位
@@ -64,6 +71,38 @@ MAX_CONCURRENT_TASKS = 8       # 槽位级并发（单账号内 8 槽并行，�
 MAX_CONCURRENT_ACCOUNTS = 2    # 批量时同时下载的账号数（账号内仍 8 槽并行，控制总请求量防封）
 MAX_RETRIES = 3
 
+# ================= 申请节流（防封） =================
+# 每申请 REQUEST_BATCH_SIZE 个存档（槽位）暂停 REQUEST_PAUSE_TIME 秒；
+# 由 SaveArchiver._acquire_request_slot 统一执行，暂停期间不会发出新申请。
+REQUEST_BATCH_SIZE = 200
+REQUEST_PAUSE_TIME = 30
+
+# ================= 槽位状态标记 =================
+# download_single_slot 返回的 status 字段（字符串标记，区别于服务器返回的 status 码）
+STATUS_EMPTY_SLOT = "未创建存档"   # 服务器返回 0：该槽位未创建存档，属正常现象
+STATUS_TOO_FAST = "申请过快"       # 服务器返回空响应：申请过快，服务器拒绝访问
+STATUS_NET_ERROR = "网络异常"      # 网络异常
+STATUS_PARSE_ERROR = "解析失败"    # 响应无法解析
+
+# 需要重试的槽位状态（既非封禁，也非“正常/未创建存档”）
+RETRYABLE_STATUSES = (STATUS_NET_ERROR, STATUS_PARSE_ERROR, STATUS_TOO_FAST)
+TOO_FAST_RETRY_COOLDOWN = 30   # 重试“申请过快”槽位前的冷却秒数
+
+# Windows 文件名非法字符
+_INVALID_FILENAME_CHARS = set('\\/:*?"<>|')
+
+
+def sanitize_filename(name):
+    """清理存档标题用于文件名。
+
+    除 Windows 保留字符外，还必须剔除控制字符（实测有存档标题含 \\x08 退格符，
+    直接拼接会 open() 报 OSError 而被误当成“网络异常”，导致存档内容丢失）。
+    """
+    cleaned = "".join(c for c in str(name)
+                      if c not in _INVALID_FILENAME_CHARS and ord(c) >= 32)
+    cleaned = cleaned.strip().rstrip(".")     # Windows 不允许结尾的点/空格
+    return cleaned or "unnamed"
+
 
 class SaveArchiver:
     def __init__(self):
@@ -71,6 +110,11 @@ class SaveArchiver:
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
         })
+        # 申请节流状态（每 REQUEST_BATCH_SIZE 个存档暂停 REQUEST_PAUSE_TIME 秒）
+        self.request_count = 0
+        self.throttle_lock = None      # asyncio.Lock，延迟到事件循环内创建
+        self.on_throttle = None        # 回调(msg, warn)，供 GUI 输出暂停日志
+        self.should_stop = None        # 回调() -> bool，暂停中可提前中断
 
     def take_verify(self, index: str, uid: str, gameid: str, gamekey: str) -> str:
         raw = f"SDALPlsldlnSLWPElsdslSE{index}{gamekey}{uid}{gameid}PKslsO"
@@ -82,8 +126,42 @@ class SaveArchiver:
         status_map = {"0": "正常", "1": "暂时封禁", "2": "永久封禁"}
         return status_map.get(str(status_code), "未知状态")
 
+    # ---- 申请节流：每申请 200 个存档暂停 30 秒（防“申请过快，服务器拒绝访问”）----
+    def reset_throttle(self):
+        """重置申请计数与锁（每次下载任务开始前调用，避免跨事件循环复用锁）"""
+        self.request_count = 0
+        self.throttle_lock = None
+
+    async def _acquire_request_slot(self):
+        """发起一次存档申请前先过闸：累计到 REQUEST_BATCH_SIZE 个则暂停 REQUEST_PAUSE_TIME 秒。
+
+        用锁保证暂停期间不会有新的存档申请发出。
+        """
+        if self.throttle_lock is None:
+            self.throttle_lock = asyncio.Lock()
+        async with self.throttle_lock:
+            if self.request_count >= REQUEST_BATCH_SIZE:
+                self.request_count = 0
+                if self.on_throttle:
+                    self.on_throttle(f"⏸ 已申请 {REQUEST_BATCH_SIZE} 个存档，"
+                                     f"暂停 {REQUEST_PAUSE_TIME} 秒（防申请过快）...", True)
+                for _ in range(REQUEST_PAUSE_TIME):
+                    if self.should_stop and self.should_stop():
+                        break
+                    await asyncio.sleep(1)
+                if self.on_throttle:
+                    self.on_throttle("▶️ 暂停结束，继续申请存档")
+            self.request_count += 1
+
     async def download_single_slot(self, index, uid, gamekey, uid_folder):
-        """下载单个槽位并存原始json。返回 dict 描述该槽位。"""
+        """下载单个槽位并存原始json。返回 dict 描述该槽位。
+
+        服务器响应形态：
+          • dict 且含 data → 正常存档
+          • 0 / 空对象    → 未创建存档（正常现象，不算失败）
+          • 空响应        → 申请过快，服务器拒绝访问（标记后交由节流/重试处理）
+        """
+        await self._acquire_request_slot()
         data = {
             'uid': uid, 'gameid': GAMEID, 'gamekey': gamekey,
             'index': index, 'verify': self.take_verify(index, uid, GAMEID, gamekey)
@@ -97,16 +175,40 @@ class SaveArchiver:
                 async with session.post('https://save.api.4399.com/ranging.php/?ac=get',
                                         data=data, timeout=15) as response:
                     resp_text = await response.text()
+                stripped = resp_text.strip()
+
+                # 空响应：申请过快，服务器拒绝访问（等节流后由重试处理）
+                if not stripped:
+                    with open(raw_path, "w", encoding="utf-8") as f:
+                        f.write("")
+                    return {"index": index, "title": "", "status": STATUS_TOO_FAST,
+                            "create_time": "", "update_times": "", "datetime": "",
+                            "data": "", "ban_status": STATUS_TOO_FAST}
+
+                # 服务器返回 0（或空对象）：该槽位未创建存档，属正常现象
+                if stripped in ("0", "{}"):
+                    with open(raw_path, "w", encoding="utf-8") as f:
+                        f.write(stripped)
+                    return {"index": index, "title": "", "status": STATUS_EMPTY_SLOT,
+                            "create_time": "", "update_times": "", "datetime": "",
+                            "data": "", "ban_status": STATUS_EMPTY_SLOT}
+
                 try:
-                    json_data = json.loads(resp_text)
+                    json_data = json.loads(stripped)
                     with open(raw_path, "w", encoding="utf-8") as f:
                         json.dump(json_data, f, ensure_ascii=False, indent=4)
                 except Exception:
                     with open(raw_path, "w", encoding="utf-8") as f:
                         f.write(resp_text)
-                    return {"index": index, "title": "", "status": "解析失败",
+                    return {"index": index, "title": "", "status": STATUS_PARSE_ERROR,
                             "create_time": "", "update_times": "", "datetime": "",
-                            "data": "", "ban_status": "解析失败"}
+                            "data": "", "ban_status": STATUS_PARSE_ERROR}
+
+                # 其它非对象响应（如 null）同样按未创建存档处理
+                if not isinstance(json_data, dict):
+                    return {"index": index, "title": "", "status": STATUS_EMPTY_SLOT,
+                            "create_time": "", "update_times": "", "datetime": "",
+                            "data": "", "ban_status": STATUS_EMPTY_SLOT}
 
                 status_code = json_data.get("status", 0)
                 title = json_data.get("title")
@@ -126,15 +228,15 @@ class SaveArchiver:
                 if b64_data and status_code == 0:
                     xml_content = self.process_save_data(b64_data)
                     if xml_content:
-                        safe_title = "".join(c for c in title if c not in r'\/:*?"<>|')
+                        safe_title = sanitize_filename(title)
                         save_path = os.path.join(uid_folder, f"{uid}_{index}_{safe_title}.xml")
                         with open(save_path, "w", encoding="utf-8") as f:
                             f.write(xml_content)
                 return result
             except Exception:
-                return {"index": index, "title": "", "status": "网络异常",
+                return {"index": index, "title": "", "status": STATUS_NET_ERROR,
                         "create_time": "", "update_times": "", "datetime": "",
-                        "data": "", "ban_status": "网络异常"}
+                        "data": "", "ban_status": STATUS_NET_ERROR}
 
     def process_save_data(self, b64_string):
         try:
@@ -166,7 +268,7 @@ class SaveArchiver:
         results = []
         for index in range(8):
             result = raw_results[index]
-            status_text = "未创建存档"
+            status_text = STATUS_EMPTY_SLOT
             title = ""
             create_time = update_times = datetime_val = ban_status = ""
             if isinstance(result, dict):
@@ -176,15 +278,16 @@ class SaveArchiver:
                 update_times = result.get("update_times", "")
                 datetime_val = result.get("datetime", "")
                 ban_status = result.get("ban_status", "")
-                if status_code in ("解析失败", "网络异常"):
-                    # 该槽位网络/解析失败（download_single_slot 异常返回，status 为字符串）
+                if status_code in (STATUS_PARSE_ERROR, STATUS_NET_ERROR,
+                                   STATUS_TOO_FAST, STATUS_EMPTY_SLOT):
+                    # 槽位级标记（download_single_slot 返回，status 为字符串而非服务器码）
                     status_text = status_code
                 elif status_code == "1":
                     status_text = "临时封禁"
                 elif status_code == "2":
                     status_text = "永久封禁"
-                elif not title or title == "未创建存档":
-                    status_text = "未创建存档"
+                elif not title:
+                    status_text = STATUS_EMPTY_SLOT
                     title = ""
                 else:
                     status_text = "正常"
@@ -232,8 +335,9 @@ class SaveArchiver:
             return None
 
     async def download_precise(self, uid, index, output_folder):
-        """下载指定槽位存档。
+        """下载指定槽位存档（失败槽位重试用）。
         返回 (success: bool, message: str, ban_status: str)"""
+        await self._acquire_request_slot()
         gamekey = self.calculate_gamekey()
         Path(output_folder).mkdir(parents=True, exist_ok=True)
         data = {
@@ -246,34 +350,47 @@ class SaveArchiver:
                 async with session.post('https://save.api.4399.com/ranging.php/?ac=get',
                                         data=data) as response:
                     resp_text = await response.text()
+
+            stripped = resp_text.strip()
+            # 空响应：申请过快，服务器拒绝访问（稍后重试）
+            if not stripped:
+                return False, STATUS_TOO_FAST, STATUS_TOO_FAST
+            # 服务器返回 0：该槽位未创建存档（正常现象，无需重试）
+            if stripped in ("0", "{}"):
+                return False, STATUS_EMPTY_SLOT, STATUS_EMPTY_SLOT
+
             try:
-                json_data = json.loads(resp_text)
-                status_code = json_data.get("status", 0)
-                title = json_data.get("title", f"uid{uid}_idx{index}")
-                safe_title = "".join(c for c in title if c not in r'\/:*?"<>|')
-                save_path = os.path.join(output_folder, f"{uid}_{index}_{safe_title}.xml")
-                b64_data = json_data.get("data", "")
-                ban_status = self.get_status_text(status_code)
-
-                if status_code == 1:
-                    return False, "账号临时封禁", "临时封禁"
-                elif status_code == 2:
-                    return False, "账号永久封禁", "永久封禁"
-
-                if status_code == 0 and b64_data:
-                    xml_content = self.process_save_data(b64_data)
-                    if xml_content:
-                        with open(save_path, "w", encoding="utf-8") as f:
-                            f.write(xml_content)
-                        return True, "下载成功", ban_status
-                    else:
-                        return False, "解析失败", ban_status
-                else:
-                    return False, "存档为空或不存在", ban_status
+                json_data = json.loads(stripped)
             except json.JSONDecodeError:
-                return False, "非JSON响应", "解析错误"
+                return False, "非JSON响应", STATUS_PARSE_ERROR
+
+            if not isinstance(json_data, dict):
+                return False, STATUS_EMPTY_SLOT, STATUS_EMPTY_SLOT
+
+            status_code = json_data.get("status", 0)
+            title = json_data.get("title") or f"uid{uid}_idx{index}"
+            safe_title = sanitize_filename(title)
+            save_path = os.path.join(output_folder, f"{uid}_{index}_{safe_title}.xml")
+            b64_data = json_data.get("data", "")
+            ban_status = self.get_status_text(status_code)
+
+            if status_code == 1:
+                return False, "账号临时封禁", "临时封禁"
+            elif status_code == 2:
+                return False, "账号永久封禁", "永久封禁"
+
+            if status_code == 0 and b64_data:
+                xml_content = self.process_save_data(b64_data)
+                if xml_content:
+                    with open(save_path, "w", encoding="utf-8") as f:
+                        f.write(xml_content)
+                    return True, "下载成功", ban_status
+                else:
+                    return False, STATUS_PARSE_ERROR, ban_status
+            else:
+                return False, STATUS_EMPTY_SLOT, STATUS_EMPTY_SLOT
         except Exception as e:
-            return False, str(e), "网络错误"
+            return False, str(e), STATUS_NET_ERROR
 
 
 # ===================== 美化版 GUI =====================
@@ -300,6 +417,8 @@ class App:
         self.success_count = 0
         self.fail_count = 0
         self.ban_count = 0
+        self.empty_count = 0      # 未创建存档槽位（服务器返回0，正常现象）
+        self.toofast_count = 0    # 申请过快槽位（服务器返回空响应）
         self.ban_list = []
         self.fail_list = []   # 失败槽位: (uid, idx, out, msg, ban_status)
 
@@ -407,6 +526,20 @@ class App:
             self.log_text.delete(1.0, tk.END)
             self.log_text.config(state=tk.DISABLED)
         self.root.after(0, _do)
+
+    # ---------------- 申请节流 ----------------
+    def _on_throttle(self, msg, warn=False):
+        """节流回调：显示“每申请200个存档暂停30秒”的暂停/恢复日志"""
+        if warn:
+            self.log_warn(msg)
+        else:
+            self.log(msg)
+
+    def _setup_throttle(self):
+        """每次下载任务开始前重置申请计数并挂上节流回调"""
+        self.archiver.reset_throttle()
+        self.archiver.on_throttle = self._on_throttle
+        self.archiver.should_stop = lambda: self.stop_flag
 
     def _set_running(self, running):
         self.is_running = running
@@ -518,9 +651,15 @@ class App:
             messagebox.showwarning("提示", "输入有效UID")
             return
         self.status_var.set("下载中...")
+        self._setup_throttle()
         try:
-            asyncio.run(self.archiver.download_account(uid, update_log=self.log))
+            results = asyncio.run(self.archiver.download_account(uid, update_log=self.log))
+            ok = sum(1 for r in results if r.get("status") == "正常")
+            empty = sum(1 for r in results if r.get("status") == STATUS_EMPTY_SLOT)
+            too_fast = sum(1 for r in results if r.get("status") == STATUS_TOO_FAST)
             self.status_var.set("✅ 单UID下载完成")
+            self.log(f"下载完成：正常 {ok} 槽，未创建存档 {empty} 槽"
+                     + (f"，{STATUS_TOO_FAST} {too_fast} 槽" if too_fast else ""))
         except Exception as e:
             self.log_error(f"错误：{str(e)}")
             self.status_var.set("下载失败")
@@ -536,6 +675,7 @@ class App:
         self.stop_flag = False
         self._account_done = 0
         self.success_count = self.fail_count = self.ban_count = 0
+        self.empty_count = self.toofast_count = 0
         self.ban_list = []
         self.fail_list = []
         threading.Thread(target=self.run_precise_async, daemon=True).start()
@@ -572,6 +712,10 @@ class App:
         self.progress["value"] = 0
         self.status_var.set("批量下载中...")
         self.log(f"===== 开始批量下载，共 {self.total_tasks} 个账号（每账号下载 1~8 全部槽位）=====")
+        self.log(f"⏱ 申请节流：每申请 {REQUEST_BATCH_SIZE} 个存档暂停 {REQUEST_PAUSE_TIME} 秒")
+
+        # 申请节流：全账号共用同一计数器/闸门（每 REQUEST_BATCH_SIZE 个存档暂停一次）
+        self._setup_throttle()
 
         # 账号级并发限制：每个账号内 8 槽并行(等同单uid下载)，但同一时间只跑少数账号，控制总请求量
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_ACCOUNTS)
@@ -597,24 +741,9 @@ class App:
                     self._account_done += 1
                     self._refresh_progress()
 
-        # 分批处理防封
-        BATCH_SIZE = 200
-        PAUSE_TIME = 30
-        total_batches = (self.total_tasks + BATCH_SIZE - 1) // BATCH_SIZE
-        for batch_num in range(total_batches):
-            if self.stop_flag:
-                break
-            s = batch_num * BATCH_SIZE
-            e = min(s + BATCH_SIZE, self.total_tasks)
-            self.log(f"第 {batch_num + 1}/{total_batches} 批，本批 {e - s} 个账号")
-            await asyncio.gather(*[run_task(item) for item in self.tasks[s:e]])
-            self._refresh_progress()
-            if batch_num < total_batches - 1 and not self.stop_flag:
-                self.log_warn(f"暂停 {PAUSE_TIME} 秒后继续下一批...")
-                for _ in range(PAUSE_TIME):
-                    if self.stop_flag:
-                        break
-                    await asyncio.sleep(1)
+        # 全部任务一次性提交：防封暂停由申请节流控制（每申请 REQUEST_BATCH_SIZE 个存档暂停一次），
+        # 不再按账号分批暂停（旧逻辑每批 200 个账号 = 最多 1600 次申请，对服务端太激进）
+        await asyncio.gather(*[run_task(item) for item in self.tasks])
 
         # 重试失败槽位（非封禁）
         if not self.stop_flag:
@@ -632,16 +761,32 @@ class App:
                 self.log_warn(f"⚠️ UID {uid} 存档 {idx}: {st}")
             elif st == "正常":
                 self.success_count += 1
-            else:
-                # 空槽(未创建存档)不视为失败；网络/解析异常才需要重试
-                if st in ("网络异常", "解析失败"):
-                    self.fail_count += 1
-                    self.fail_list.append((uid, idx, out, st, ""))
+            elif st == STATUS_EMPTY_SLOT:
+                # 服务器返回 0：未创建存档，正常现象（不算失败）
+                self.empty_count += 1
+            elif st in RETRYABLE_STATUSES:
+                # 网络/解析异常、申请过快 → 计入失败并重试
+                if st == STATUS_TOO_FAST:
+                    self.toofast_count += 1
+                    self.log_warn(f"⏳ UID {uid} 存档 {idx}: {STATUS_TOO_FAST}（服务器拒绝访问），稍后重试")
+                self.fail_count += 1
+                self.fail_list.append((uid, idx, out, st, ""))
 
     async def _retry_fails(self):
         normal = [x for x in self.fail_list if x[4] not in ("临时封禁", "永久封禁")]
         if not normal:
             return
+
+        # “申请过快”属服务端限流，先冷却再重试
+        too_fast = [x for x in normal if x[3] == STATUS_TOO_FAST]
+        if too_fast:
+            self.log_warn(f"其中 {len(too_fast)} 个槽位为「{STATUS_TOO_FAST}」，"
+                          f"先冷却 {TOO_FAST_RETRY_COOLDOWN} 秒再重试...")
+            for _ in range(TOO_FAST_RETRY_COOLDOWN):
+                if self.stop_flag:
+                    return
+                await asyncio.sleep(1)
+
         self.log_warn(f"开始重试 {len(normal)} 个失败槽位（非封禁）...")
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
@@ -659,6 +804,11 @@ class App:
                         return
                     if ok:
                         self.success_count += 1
+                        self.fail_count = max(0, self.fail_count - 1)
+                        return
+                    if ban_status == STATUS_EMPTY_SLOT:
+                        # 服务器返回 0：未创建存档，正常现象，无需重试
+                        self.empty_count += 1
                         self.fail_count = max(0, self.fail_count - 1)
                         return
                     if attempt < MAX_RETRIES - 1:
@@ -689,8 +839,11 @@ class App:
             for uid, idx, out, msg, bs in real:
                 self.log_error(f"   UID: {uid}, 存档: {idx}, 原因: {msg}")
             self.log_error('=' * 30)
-        self.log(f"下载统计：成功槽位 {self.success_count}，失败槽位 {self.fail_count}，封禁槽位 {self.ban_count}（账号 {self._account_done}/{self.total_tasks}）")
-        messagebox.showinfo("完成", f"账号处理：{self._account_done}/{self.total_tasks}\n成功槽位：{self.success_count}\n失败槽位：{self.fail_count}\n封禁槽位：{self.ban_count}")
+        self.log(f"下载统计：成功槽位 {self.success_count}，失败槽位 {self.fail_count}，封禁槽位 {self.ban_count}"
+                 f"，未创建存档 {self.empty_count}，申请过快 {self.toofast_count}（账号 {self._account_done}/{self.total_tasks}）")
+        messagebox.showinfo("完成", f"账号处理：{self._account_done}/{self.total_tasks}\n成功槽位：{self.success_count}\n"
+                                   f"失败槽位：{self.fail_count}\n封禁槽位：{self.ban_count}\n"
+                                   f"未创建存档：{self.empty_count}\n申请过快：{self.toofast_count}")
 
 
 def run_tool():
