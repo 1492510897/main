@@ -126,11 +126,244 @@ def verify_signature(content: str, signature: str) -> bool:
     return hmac.compare_digest(generate_signature(content), signature)
 
 
-LOG_CACHE = {}
+class RunLogger:
+    """线程安全运行日志：内存缓冲 + UI 回调 + 实时落盘 + 可导出。
+
+    取代原先直接向 tkinter Text 写日志的做法（原 clear_log 会被子线程直接调用，
+    属线程不安全操作；且日志只存在于界面上，无法导出留档）。
+
+    file_path 设置后每条日志会同步追加到文件：即使程序异常退出/窗口关闭，
+    运行日志也已落盘，不会随界面一起丢失。
+    """
+
+    def __init__(self, on_emit=None, file_path=None):
+        self._lock = threading.Lock()
+        self._records = []          # [(时间str, 级别, 文本)]
+        self.on_emit = on_emit      # 回调(时间, 级别, 文本)，用于刷新 UI
+        self.session = None         # 当前会话信息 dict（用于导出抬头）
+        self.file_path = None       # 实时落盘文件
+        self._file = None
+        if file_path:
+            self.open_file(file_path)
+
+    # ---- 实时落盘 ----
+    def open_file(self, path):
+        """开启实时落盘（写入会话抬头）。"""
+        self.close_file()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        self._file = open(path, "w", encoding="utf-8")
+        self.file_path = path
+        self._file.write(self._header_text())
+        self._file.flush()
+        return path
+
+    def close_file(self):
+        if self._file:
+            try:
+                self._file.flush()
+                self._file.close()
+            except Exception:
+                pass
+            self._file = None
+
+    def _header_text(self):
+        lines = ["=" * 60, "📝 运行日志", "=" * 60]
+        for key, value in (self.session or {}).items():
+            lines.append(f"{key}：{value}")
+        lines.append("")
+        return "\n".join(lines) + "\n"
+
+    def log(self, msg, level="INFO"):
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        text = str(msg)
+        with self._lock:
+            self._records.append((ts, level, text))
+            if self._file:
+                try:
+                    self._file.write(f"[{ts}] [{level}] {text}\n")
+                    self._file.flush()
+                except Exception:
+                    pass    # 落盘失败不影响检测主流程
+        if self.on_emit:
+            self.on_emit(ts, level, text)
+
+    def clear(self):
+        with self._lock:
+            self._records.clear()
+
+    def snapshot(self):
+        with self._lock:
+            return list(self._records)
+
+    def __len__(self):
+        with self._lock:
+            return len(self._records)
+
+    def to_text(self, extra_header=None):
+        """导出为纯文本（含会话抬头与统计）。"""
+        lines = []
+        if self.session:
+            lines.append("=" * 60)
+            lines.append(f"📝 运行日志 · {self.session.get('mode', '检测')}")
+            lines.append("=" * 60)
+            for key, value in self.session.items():
+                if key != 'mode':
+                    lines.append(f"{key}：{value}")
+            lines.append("")
+        if extra_header:
+            lines.append(extra_header)
+            lines.append("")
+        lines.extend(f"[{ts}] [{level}] {msg}" for ts, level, msg in self.snapshot())
+        return "\n".join(lines) + "\n"
+
+    def export(self, path, extra_header=None):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.to_text(extra_header))
+        return path
+
+    @staticmethod
+    def new_session_path(mode):
+        """生成 outputdata/运行日志/运行日志_<模式>_<时间>.txt。"""
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        return os.path.join(OUTPUT_DIR, "运行日志", f"运行日志_{mode}_{stamp}.txt")
 
 
-def save_log_by_uid(uid, result_info):
-    return  # 已禁用原单UID导出
+class ReportRenderer:
+    """结构化检测数据 → 文本/CSV 的统一渲染层。
+
+    所有报告出口（单文件报告、UID 异常详情、批量 CSV）都集中在此，
+    避免各处手工拼字符串、再由下游 split 反解（结构信息在拼接中丢失）。
+    """
+
+    @staticmethod
+    def _status_tag(status):
+        return (status or 'pass').upper()
+
+    @staticmethod
+    def _vip_text(vip_level):
+        """VIP 展示文本：有效等级 → 'VIPn'（项目内既有风格），未知/缺失 → '无'。"""
+        try:
+            level = int(vip_level)
+        except (TypeError, ValueError):
+            return '无'
+        return f"VIP{level}" if level >= 0 else '无'
+
+    # ---- 单文件检测报告 ----
+    @staticmethod
+    def render_single_report(meta, results):
+        lines = [
+            f"检测文件：{meta.get('file_path', '')}",
+            f"检测时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            f"UID：{meta.get('uid', '')}",
+            f"🔢 理论UID_Index：{meta.get('theory_uid_index', '无')}",
+            f"🔢 实际UID_Index：{meta.get('actual_uid_index', '无')}",
+        ]
+        if meta.get('index_mismatch'):
+            lines.append(f"⚠️ index 异常：理论 {meta.get('theory_uid_index')} / "
+                         f"实际 {meta.get('actual_uid_index')} 不一致")
+        lines.extend(["", "=" * 50, ""])
+        for res in results:
+            if isinstance(res, dict):
+                lines.append(f"【{res.get('title', '检测项')}】"
+                             f"[{ReportRenderer._status_tag(res.get('status'))}]")
+                lines.append(str(res.get('msg', '')))
+                lines.append("")
+        return "\n".join(lines)
+
+    # ---- 单个存档条目文本（UID 详情文件用） ----
+    @staticmethod
+    def render_uid_detail(uid, items, vip_level=None):
+        """items: [{fname,theory,actual,name,cost,uid_cost,uid_file_count,
+                   status,reason,index_mismatch,index_tag,detail_lines}]
+        vip_level: 该账号最高 VIP 等级（同UID多档取最高），<0 或 None 表示无。
+        """
+        uid_indexes = sorted({it['theory'] for it in items if it['theory'] != '无'})
+        total_cost = sum(it['cost'] for it in items)
+        # 账号合并消费：同一 UID 下全部存档（含未异常存档）消费之和
+        uid_total_cost = max(it.get('uid_cost', it['cost']) for it in items)
+        uid_file_count = max(it.get('uid_file_count', 1) for it in items)
+        uid_status = 'FAIL' if any(it['status'] == 'fail' for it in items) else 'WARN'
+        mismatch_items = [it for it in items if it['index_mismatch']]
+        banned_slots = sorted({it['ban_tag'] for it in items if it.get('ban_tag')})
+
+        lines = ["=" * 60,
+                 "📄 存档异常详情报告（同一UID汇总）",
+                 "=" * 60,
+                 "",
+                 f"🆔 UID：{uid}",
+                 f"👑 VIP：{ReportRenderer._vip_text(vip_level)}",
+                 f"📁 UID_Index：{', '.join(uid_indexes) if uid_indexes else '无'}",
+                 f"📂 异常存档数：{len(items)} 个",
+                 f"🔍 检测结果：{uid_status}",
+                 f"💰 账号合并消费(该UID全部 {uid_file_count} 个存档)：{uid_total_cost}",
+                 f"💰 异常存档消费合计：{total_cost}",
+                 "📄 涉及文件：" + "、".join(it['fname'] for it in items),
+                 ""]
+        if banned_slots:
+            lines.append("🚨 【封禁槽位】" + "；".join(banned_slots))
+            lines.append("")
+
+        # index 异常单独指出
+        if mismatch_items:
+            lines.append("🔢 【index 异常单独指出】")
+            for it in mismatch_items:
+                extra_name = f" | Name：{it['name']}" if it['name'] else ""
+                lines.append(f"   • {it['fname']} | {it['index_tag']}{extra_name}")
+        else:
+            lines.append("🔢 【index 异常单独指出】：未发现 index 不一致")
+        lines.append("")
+
+        for it in sorted(items, key=lambda x: x['theory']):
+            lines.append("-" * 60)
+            lines.append(f"📄 原始文件：{it['fname']}")
+            lines.append(f"📁 理论UID_Index：{it['theory']}")
+            lines.append(f"📄 实际UID_Index：{it['actual']}")
+            if it['name']:
+                lines.append(f"📛 Name：{it['name']}")
+            lines.append(f"💰 本存档消费：{it['cost']}（该UID账号合并消费：{uid_total_cost}）")
+            lines.append(f"🔍 检测结果：{it['status'].upper()}")
+            if it.get('ban_tag'):
+                lines.append(f"🚨 封禁情况：{it['ban_tag']}")
+            if it['index_mismatch']:
+                lines.append(f"🔢 index 异常：{it['index_tag']}")
+            lines.append(f"📝 异常摘要：{it['reason']}")
+            lines.append("")
+            lines.append("📋 详细检测日志:")
+            lines.append("")
+            lines.append("\n".join(it['detail_lines']) if it['detail_lines'] else "（无详细日志）")
+            lines.append("")
+
+        return "\n".join(lines)
+
+    # ---- 批量 CSV ----
+    @staticmethod
+    def build_batch_csv_rows(uid_rows):
+        """uid_rows: [{uid,indexes,index_display,name,vip_level,status,reason,
+                       multi,items,inactive_bans}] → CSV 行列表
+
+        列顺序：UID_Index | Name | VIP | 状态 | 涉及存档数 | 封禁槽位 | 异常摘要
+        UID_Index 列采用 uid_index_name 格式（每个存档自带名称，与 Name 列一一对应）。
+        """
+        rows = [['UID_Index', 'Name', 'VIP', '状态', '涉及存档数', '封禁槽位', '异常摘要']]
+        for row in uid_rows:
+            detail = (row.get('reason') or '').replace('\n', ' ').replace('\r', ' ').replace(',', '，')
+            if len(detail) > 500:
+                detail = detail[:500] + "..."
+            items = row.get('items') or []
+            # 封禁列：本次检测到的封禁存档 + 未参与检测的封禁槽位（服务器未返回内容）
+            ban_tags = {it['ban_tag'] for it in items if it.get('ban_tag')}
+            ban_tags.update(row.get('inactive_bans') or [])
+            rows.append([
+                row.get('index_display') or '无',
+                row.get('name') or '无',
+                ReportRenderer._vip_text(row.get('vip_level')),
+                row.get('status') or 'warn',
+                len(items),
+                "；".join(sorted(ban_tags)) or '无',
+                detail,
+            ])
+        return rows
 
 
 # ========================================================
@@ -138,10 +371,14 @@ def save_log_by_uid(uid, result_info):
 # ========================================================
 class SlotBanCache:
     """从下载工具产物 *_details.csv 加载永久/临时封禁信息。
-    兼容表头：新版(存档/标题/状态/封禁状态) 与 旧版(槽位/名称/状态)"""
+    兼容表头：新版(存档/标题/状态/封禁状态) 与 旧版(槽位/名称/状态)
+
+    封禁是**槽位级**的（如账号仅存档1被封），因此缓存按 {uid: {槽位: 原因}} 保存：
+    否则按 UID 匹配会把整账号每个存档都标成封禁，导致同一封禁被重复写入日志/报告。
+    """
 
     def __init__(self):
-        self.ban_cache = defaultdict(list)  # {uid: [reason, ...]}
+        self.ban_cache = defaultdict(dict)  # {uid: {slot_index: reason}}
 
     def load_all_csv_from_root(self, root_folder):
         print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 🔍 扫描CSV: {root_folder}")
@@ -180,19 +417,63 @@ class SlotBanCache:
                         reason = f"临时封禁 | 存档{idx} | {title}"
 
                     if reason:
-                        self.ban_cache[uid].append(reason)
+                        # 同一槽位重复出现时覆盖，避免重复 CSV 累积同一封禁
+                        self.ban_cache[uid][idx] = reason
         except Exception:
             pass
 
-    def get_ban_reason(self, fname):
-        match = re.match(r"^(\d+)_(\d+)(?:_|\.)", fname)
+    @staticmethod
+    def _uid_and_slot(fname):
+        """从文件名解析 (uid, slot)，如 1360683320_1_xxx.xml → ('1360683320', '1')。"""
+        match = re.match(r"^(\d+)_(\d+)(?:_|\.)", str(fname))
         if not match:
+            return None, None
+        return match.group(1), str(int(match.group(2)))
+
+    def get_account_ban_reason(self, uid):
+        """账号级封禁信息（该账号全部被封槽位，按槽位排序，已去重）。"""
+        slots = self.ban_cache.get(str(uid))
+        if not slots:
             return None
-        uid = match.group(1)
-        reasons = self.ban_cache.get(uid)
-        if not reasons:
+        ordered = sorted(slots, key=lambda x: int(x))
+        return "；".join(dict.fromkeys(slots[k] for k in ordered))
+
+    def get_slot_ban_reason(self, fname):
+        """槽位级封禁：仅当该文件**自身槽位**被封禁时返回，否则 None。
+
+        批量检测用。旧逻辑按 UID 匹配会把同账号其它正常存档也标成封禁，
+        造成同一封禁被重复写入日志与报告。
+        """
+        uid, slot = self._uid_and_slot(fname)
+        if uid is None:
             return None
-        return "；".join(dict.fromkeys(reasons))
+        slots = self.ban_cache.get(uid)
+        if not slots:
+            return None
+        return slots.get(slot)
+
+    def get_ban_reason(self, fname):
+        """账号级封禁信息（单文件检测用：一次检测只输出一次，不会重复）。"""
+        uid, _ = self._uid_and_slot(fname)
+        if uid is None:
+            return None
+        return self.get_account_ban_reason(uid)
+
+    def get_inactive_bans(self, uid, fnames=None):
+        """该账号被封但**没有对应 XML 文件**的槽位（服务器不返回内容，无法参与检测）。
+
+        返回文本列表；已包含在 fnames 中的槽位不会重复列出。
+        """
+        slots = self.ban_cache.get(str(uid))
+        if not slots:
+            return []
+        present = set()
+        for fn in (fnames or []):
+            _, slot = self._uid_and_slot(fn)
+            if slot is not None:
+                present.add(slot)
+        return [f"存档{slot} - {slots[slot]}"
+                for slot in sorted(slots, key=lambda x: int(x)) if slot not in present]
 
 
 # 全局实例，整个程序共用
@@ -879,6 +1160,10 @@ class AppDetector:
         self.current_actual_uid_index = "无"
         self.current_index_mismatch = False
 
+        # 运行日志（线程安全缓冲；界面刷新经回调调度到主线程）
+        self.logger = RunLogger(on_emit=self._on_log_emit)
+        self._log_file = None        # 当前会话实时落盘文件（可选）
+
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         self._ensure_dirs()
         self._init_config()
@@ -889,12 +1174,44 @@ class AppDetector:
         try:
             if hasattr(self, 'after_id'):
                 self.root.after_cancel(self.after_id)
+        except Exception:
+            pass
+        try:
+            if self.logger:
+                self.logger.close_file()
+        except Exception:
+            pass
+        try:
             self.root.destroy()
         except Exception:
             pass
 
+    def _start_log_session(self, mode, **info):
+        """开启一次检测会话的运行日志（实时落盘，避免异常退出丢失）。"""
+        session = {'mode': mode,
+                   '开始时间': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        session.update(info)
+        self.logger.clear()
+        self.logger.session = session
+        try:
+            path = RunLogger.new_session_path(mode)
+            self.logger.open_file(path)
+            self._log_file = path
+        except Exception as e:
+            self._log_file = None
+            self.log(f"⚠️ 运行日志落盘失败（不影响检测）：{e}", "WARN")
+        return self._log_file
+
+    def _finish_log_session(self, summary):
+        """结束会话：把汇总写入日志并关闭文件。"""
+        self.log(summary, "PASS")
+        self.log(f"📝 本次运行日志：{self._log_file}", "INFO" if self._log_file else "WARN")
+        self.logger.close_file()
+
     def _ensure_dirs(self):
-        dirs = [INPUT_DIR, OUTPUT_DIR, TEST_DIR, os.path.join(OUTPUT_DIR, "异常详情")]
+        dirs = [INPUT_DIR, OUTPUT_DIR, TEST_DIR,
+                os.path.join(OUTPUT_DIR, "异常详情"),
+                os.path.join(OUTPUT_DIR, "运行日志")]
         for d in dirs:
             if not os.path.exists(d):
                 os.makedirs(d)
@@ -1144,7 +1461,11 @@ class AppDetector:
         btn_y_3 = btn_y_2 + btn_h + btn_gap
         tk.Button(left_frame, text="📄 打开下载工具", command=self._run_info_get,
                   bg="#E0E0E0", fg="#EE0B0B", font=("Microsoft YaHei", 10), bd=1, relief="solid"
-                  ).place(x=20, y=btn_y_3, width=left_width - 40, height=btn_h)
+                  ).place(x=20, y=btn_y_3, width=(left_width - 40) // 2 - 5, height=btn_h)
+        tk.Button(left_frame, text="📝 导出运行日志", command=self._export_run_log,
+                  bg="#E0E0E0", fg="#333333", font=("Microsoft YaHei", 10), bd=1, relief="solid"
+                  ).place(x=20 + (left_width - 40) // 2 + 5, y=btn_y_3,
+                          width=(left_width - 40) // 2 - 5, height=btn_h)
 
         right_frame = tk.Frame(frame, bg="#F0F0F0")
         right_frame.place(x=main_area_x + left_width + 10, y=main_area_y,
@@ -1168,20 +1489,60 @@ class AppDetector:
         self.log_text.tag_config("INFO", foreground="#9CDCFE")
 
     def log(self, msg, level="INFO"):
-        self.root.after(0, self._real_log, msg, level)
+        """线程安全日志入口：任意线程可调用，内部转交 RunLogger。"""
+        self.logger.log(msg, level)
 
-    def _real_log(self, msg, level="INFO"):
-        now = datetime.datetime.now().strftime("%H:%M:%S")
-        log_str = f"[{now}] [{level}] {msg}\n"
+    def _on_log_emit(self, ts, level, text):
+        """RunLogger 回调（可能来自子线程）→ 调度到 Tk 主线程刷新界面。"""
+        try:
+            self.root.after(0, self._append_log_line, ts, level, text)
+        except Exception:
+            # 窗口已销毁（如程序退出中）时忽略，保证子线程不因此崩溃
+            pass
+
+    def _append_log_line(self, ts, level, text):
+        log_str = f"[{ts}] [{level}] {text}\n"
         self.log_text.config(state="normal")
         self.log_text.insert(tk.END, log_str, level)
         self.log_text.see(tk.END)
         self.log_text.config(state="disabled")
 
     def clear_log(self):
+        """清空界面与缓冲（线程安全：界面操作始终走主线程）。"""
+        self.logger.clear()
+        try:
+            self.root.after(0, self._clear_log_widget)
+        except Exception:
+            pass
+
+    def _clear_log_widget(self):
         self.log_text.config(state="normal")
         self.log_text.delete(1.0, tk.END)
         self.log_text.config(state="disabled")
+
+    def _export_run_log(self):
+        """导出当前运行日志（含会话抬头）供留档。
+
+        任务进行中日志文件已在实时落盘；此处于用户指定位置另存一份完整副本。
+        """
+        if len(self.logger) == 0:
+            messagebox.showwarning("提示", "暂无运行日志可导出")
+            return
+        mode = (self.logger.session or {}).get('mode', '检测')
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"运行日志_{mode}_{stamp}.txt"
+        path = filedialog.asksaveasfilename(
+            title="导出运行日志", defaultextension=".txt",
+            initialfile=default_name, filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            self.logger.export(path)
+        except Exception as e:
+            messagebox.showerror("错误", f"导出失败：{e}")
+            return
+        self.log(f"📝 运行日志已导出：{path}", "INFO")
+        messagebox.showinfo("完成", f"运行日志已导出：\n{path}")
 
     # ---------- 设置页 ----------
     def _build_settings_page(self):
@@ -1492,8 +1853,8 @@ class AppDetector:
         return overall
 
     def _do_detect_work(self):
-        self.clear_log()
         file_path = self.entry_file_path.get().strip()
+        self._start_log_session('单文件检测', 检测文件=file_path)
         bin_path = self._get_str('bin_path', DEFAULT_BIN_PATH)
         max_details = self._get_int('max_export_details', 10)
         min_money = self._get_int('min_money_details', 500)
@@ -1526,6 +1887,8 @@ class AppDetector:
         self.current_results = results
         self.current_file_path = file_path
         self._generate_report(auto_ok=True)
+        overall = self._overall_of(results)
+        self._finish_log_session(f"检测结束 | 状态:{overall.upper()} | 文件:{os.path.basename(file_path)}")
 
     # ---------- 报告 ----------
     def _generate_report(self, auto_ok=False):
@@ -1537,24 +1900,15 @@ class AppDetector:
         report_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         report_path = os.path.join(OUTPUT_DIR, f"检测报告_{name}_{report_time}.txt")
 
+        meta = {
+            'file_path': self.current_file_path,
+            'uid': self.current_uid_info,
+            'theory_uid_index': self.current_theory_uid_index,
+            'actual_uid_index': self.current_actual_uid_index,
+            'index_mismatch': self.current_index_mismatch,
+        }
         with open(report_path, 'w', encoding='utf-8') as f:
-            f.write(f"检测文件：{self.current_file_path}\n")
-            f.write(f"检测时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"UID：{self.current_uid_info}\n")
-            f.write(f"🔢 理论UID_Index：{self.current_theory_uid_index}\n")
-            f.write(f"🔢 实际UID_Index：{self.current_actual_uid_index}\n")
-            if self.current_index_mismatch:
-                f.write(f"⚠️ index 异常：理论 {self.current_theory_uid_index} / "
-                        f"实际 {self.current_actual_uid_index} 不一致\n")
-            f.write("\n")
-            f.write("=" * 50 + "\n\n")
-            for res in self.current_results:
-                if isinstance(res, dict):
-                    title = res.get('title', '检测项')
-                    status = res.get('status', 'pass')
-                    msg = res.get('msg', '')
-                    f.write(f"【{title}】[{status}]\n")
-                    f.write(msg + "\n\n")
+            f.write(ReportRenderer.render_single_report(meta, self.current_results))
 
         if self._get_bool('auto_open_dir', False):
             self._open_dir(OUTPUT_DIR)
@@ -1628,65 +1982,40 @@ class AppDetector:
             return True, f"理论 {theory} ≠ 实际 {actual}"
         return False, ""
 
-    def _write_uid_detail_file(self, uid, items):
-        """将同一 UID 下所有异常存档汇总为一份详情文件。
-        items: [{fname,theory,actual,name,cost,status,reason,index_mismatch,index_tag,detail_lines}]"""
+    @staticmethod
+    def _index_sort_key(uid_index):
+        """按 uid_index（如 '1234567_10'）排序：先 UID 再 Index 数值，避免 '10' < '2' 的字典序问题。"""
+        text = str(uid_index or '')
+        m = re.match(r"^(\d+)_(\d+)$", text)
+        if m:
+            return (0, int(m.group(1)), int(m.group(2)))
+        return (1, 0, 0)
+
+    @staticmethod
+    def _uid_index_name(uid_index, name):
+        """拼装 uid_index_name 展示形式（无 name 时回退到纯 uid_index）。"""
+        if not uid_index or uid_index == '无':
+            return '无'
+        return f"{uid_index}_{name}" if name else str(uid_index)
+
+    @staticmethod
+    def _write_uid_detail_file(uid, items, banned_slots=None, vip_level=None):
+        """将同一 UID 下所有异常存档汇总为一份详情文件（渲染交 ReportRenderer）。"""
         detail_dir = os.path.join(OUTPUT_DIR, "异常详情")
         os.makedirs(detail_dir, exist_ok=True)
-
-        uid_indexes = sorted({it['theory'] for it in items if it['theory'] != '无'})
-        total_cost = sum(it['cost'] for it in items)
-        # 账号合并消费：同一 UID 下全部存档（含未异常存档）消费之和
-        uid_total_cost = max(it.get('uid_cost', it['cost']) for it in items)
-        uid_file_count = max(it.get('uid_file_count', 1) for it in items)
-        uid_status = 'FAIL' if any(it['status'] == 'fail' for it in items) else 'WARN'
-        mismatch_items = [it for it in items if it['index_mismatch']]
-
-        lines = ["=" * 60,
-                 "📄 存档异常详情报告（同一UID汇总）",
-                 "=" * 60,
-                 "",
-                 f"🆔 UID：{uid}",
-                 f"📁 UID_Index：{', '.join(uid_indexes) if uid_indexes else '无'}",
-                 f"📂 异常存档数：{len(items)} 个",
-                 f"🔍 检测结果：{uid_status}",
-                 f"💰 账号合并消费(该UID全部 {uid_file_count} 个存档)：{uid_total_cost}",
-                 f"💰 异常存档消费合计：{total_cost}",
-                 "📄 涉及文件：" + "、".join(it['fname'] for it in items),
-                 ""]
-
-        # index 异常单独指出
-        if mismatch_items:
-            lines.append("🔢 【index 异常单独指出】")
-            for it in mismatch_items:
-                extra_name = f" | Name：{it['name']}" if it['name'] else ""
-                lines.append(f"   • {it['fname']} | {it['index_tag']}{extra_name}")
-        else:
-            lines.append("🔢 【index 异常单独指出】：未发现 index 不一致")
-        lines.append("")
-
-        for it in sorted(items, key=lambda x: x['theory']):
-            lines.append("-" * 60)
-            lines.append(f"📄 原始文件：{it['fname']}")
-            lines.append(f"📁 理论UID_Index：{it['theory']}")
-            lines.append(f"📄 实际UID_Index：{it['actual']}")
-            if it['name']:
-                lines.append(f"📛 Name：{it['name']}")
-            lines.append(f"💰 本存档消费：{it['cost']}（该UID账号合并消费：{uid_total_cost}）")
-            lines.append(f"🔍 检测结果：{it['status'].upper()}")
-            if it['index_mismatch']:
-                lines.append(f"🔢 index 异常：{it['index_tag']}")
-            lines.append(f"📝 异常摘要：{it['reason']}")
-            lines.append("")
-            lines.append("📋 详细检测日志:")
-            lines.append("")
-            lines.append("\n".join(it['detail_lines']) if it['detail_lines'] else "（无详细日志）")
-            lines.append("")
-
+        for it in items:
+            it.setdefault('ban_tag', '')
+        text = ReportRenderer.render_uid_detail(uid, items, vip_level=vip_level)
+        if banned_slots:
+            note = ("\n" + "-" * 60 + "\n"
+                    "ℹ️ 说明：以下槽位在下载结果中被标记封禁，因服务器不返回内容（无 XML 文件），\n"
+                    "   故未参与本次存档检测，封禁信息仅记录如下：\n"
+                    + "\n".join(f"   • {s}" for s in banned_slots) + "\n")
+            text += note
         safe_uid = re.sub(r'[<>:"/\\|?*]', '_', str(uid))
         detail_path = os.path.join(detail_dir, f"{safe_uid}_异常详情.txt")
         with open(detail_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+            f.write(text)
         return detail_path
 
     # ---------- 批量检测 ----------
@@ -1699,7 +2028,7 @@ class AppDetector:
         threading.Thread(target=self._do_batch_detect, args=(folder_path,), daemon=True).start()
 
     def _do_batch_detect(self, folder_path):
-        self.clear_log()
+        self._start_log_session('批量检测', 目标目录=folder_path)
         self.log(f"📂 开始批量检测：{folder_path}", "INFO")
         self.log("需要半分钟左右时间，请耐心等待", "INFO")
 
@@ -1777,11 +2106,12 @@ class AppDetector:
                 warn += 1
             else:
                 success += 1
-            self.log(f"文件:{os.path.basename(fp)} | UID:{res.get('uid','')} | 状态:{res['overall'].upper()}",
+            # 日志以 uid_index_name 标识存档（index 与存档名一一对应）
+            label = self._uid_index_name(res.get('file_uid_index') or '无', res.get('file_name'))
+            self.log(f"文件:{label} | UID:{res.get('uid','')} | 状态:{res['overall'].upper()}",
                      res['overall'].upper())
 
         self.log("📝 开始生成异常详情文件...", "INFO")
-        abnormal_report = []          # 用于 CSV 的行（按 UID 汇总）
         uid_group = {}                # {uid: [每个存档的异常信息]} 同一UID汇总
 
         # α 风格：按 UID 汇总输出详情（同一 UID 下多个 uid_index 合并为一份文件）
@@ -1821,16 +2151,21 @@ class AppDetector:
                 'reason': file_reason,
                 'index_mismatch': index_mismatch,
                 'index_tag': index_tag,
+                'ban_tag': res.get('ban_tag', ''),
                 'detail_lines': detail_lines,
             })
 
-        # 逐 UID 输出：一份汇总详情文件 + 一行 CSV
+        # 逐 UID 输出：一份汇总详情文件 + 一行结构化 CSV 数据
+        uid_rows = []
         for uid, items in uid_group.items():
-            self._write_uid_detail_file(uid, items)
-
             uid_fail = any(it['status'] == 'fail' for it in items)
             uid_indexes = sorted({it['theory'] for it in items if it['theory'] != '无'})
-            display_indexes = ", ".join(uid_indexes) if uid_indexes else '无'
+            # uid_index_name：按理论 index 排序，每项带上该存档名称（与 Name 列一一对应）
+            indexed_items = sorted(items, key=lambda x: self._index_sort_key(x['theory']))
+            display_parts = [self._uid_index_name(it['theory'], it.get('name'))
+                             for it in indexed_items if it['theory'] != '无']
+            display_parts = [p for p in display_parts if p != '无']
+            display_indexes = ", ".join(display_parts) if display_parts else '无'
             multi = len(items) > 1
 
             # 异常 index 单独指出（理论UID_Index 与实际UID_Index 不一致的存档）
@@ -1845,19 +2180,39 @@ class AppDetector:
             for it in items:
                 prefix = f"[{it['theory']}] " if multi else ""
                 reason_parts.append(f"{prefix}{it['reason']}")
+
+            # 未参与检测的封禁槽位（无 XML 文件）：只在汇总处输出一次，避免逐档重复
+            banned_slots = sorted({it['ban_tag'] for it in items if it['ban_tag']})
+            inactive_bans = SLOT_BAN_CACHE.get_inactive_bans(uid)
+            if inactive_bans:
+                reason_parts.append("🚨 未参与检测的封禁槽位：" + "；".join(
+                    s for s in inactive_bans if s not in banned_slots))
+
             uid_reason = "；".join(reason_parts).replace('\n', ' ').replace('\r', ' ').strip()
             if len(uid_reason) > 500:
                 uid_reason = uid_reason[:500] + "..."
 
-            uid_name = items[0]['name'] or '无'
-            if uid_fail:
-                abnormal_report.append(f"❌异常：{display_indexes}|{uid_name}|{uid_reason}")
-            else:
-                abnormal_report.append(f"⚠️警告：{display_indexes}|{uid_name}|{uid_reason}")
+            uid_rows.append({
+                'uid': uid,
+                'indexes': uid_indexes,
+                'index_display': display_indexes,
+                'name': items[0]['name'] or '无',
+                'vip_level': uid_max_vip.get(uid),
+                'status': 'fail' if uid_fail else 'warn',
+                'reason': uid_reason,
+                'multi': multi,
+                'items': items,
+                'inactive_bans': inactive_bans,
+            })
 
-        self.log(f"📝 已按UID汇总生成 {len(uid_group)} 份异常详情文件", "INFO")
-        self._generate_batch_report(abnormal_report, success, warn, fail, total)
-        self.log(f"批量检测结束\n✅ 通过:{success} ⚠️ 警告:{warn} ❌ 异常:{fail} | 总计:{total}", "PASS")
+        for row in uid_rows:
+            self._write_uid_detail_file(row['uid'], row['items'], row['inactive_bans'],
+                                        vip_level=row.get('vip_level'))
+
+        self.log(f"📝 已按UID汇总生成 {len(uid_rows)} 份异常详情文件", "INFO")
+        self._generate_batch_report(uid_rows, success, warn, fail, total)
+        self._finish_log_session(
+            f"批量检测结束\n✅ 通过:{success} ⚠️ 警告:{warn} ❌ 异常:{fail} | 总计:{total}")
 
     def _finalize_batch_results(self, file_result_map, uid_max_vip=None):
         """按账号（同一 UID）合并消费统计并完成 VIP 联合检测。
@@ -1931,10 +2286,13 @@ class AppDetector:
         else:
             server_uid = None
 
-        # 封禁检测
-        ban_reason = SLOT_BAN_CACHE.get_ban_reason(fname)
+        # 封禁检测：只取**本文件自身槽位**的封禁，避免同账号其它存档被重复标记
+        # （账号级封禁信息在按 UID 汇总处只输出一次）
+        ban_reason = SLOT_BAN_CACHE.get_slot_ban_reason(fname)
         ban_result = {"status": "pass", "title": "📄 存档封禁检测", "msg": "✅ 未检测到存档封禁"}
+        ban_tag = ""
         if ban_reason:
+            ban_tag = ban_reason
             ban_result = {"status": "fail", "title": "📄 存档封禁检测", "msg": f"🚨 {ban_reason}"}
 
         # UID 一致性校验（文件名 vs 文件内）
@@ -1967,6 +2325,7 @@ class AppDetector:
             'uid': server_uid or inner_uid or '',
             'overall': overall,
             'results': results,
+            'ban_tag': ban_tag,
             'file_uid': file_uid,
             'file_index': file_index,
             'file_name': file_name,
@@ -1977,48 +2336,26 @@ class AppDetector:
             'total_cost': current_cost,
         }
 
-    def _generate_batch_report(self, abnormal_report, success, warn, fail, total):
-        """生成批量检测 CSV 报告（按 UID 汇总；列：UID_Index/Name/状态/异常摘要）"""
+    def _generate_batch_report(self, uid_rows, success, warn, fail, total):
+        """生成批量检测 CSV 报告（按 UID 汇总）。
+
+        uid_rows 为结构化数据，直接交给 ReportRenderer 渲染 —— 不再把数据先拼成
+        字符串行、再 split('|') 反解（旧做法在标题/摘要含分隔符时会错列，且丢字段）。
+        """
         report_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_report_name = f"批量检测报告_{report_time}.csv"
-        csv_report_path = os.path.join(OUTPUT_DIR, csv_report_name)
+        csv_report_path = os.path.join(OUTPUT_DIR, f"批量检测报告_{report_time}.csv")
 
-        csv_rows = [['UID_Index', 'Name', '状态', '异常摘要']]
-        valid_count = 0
-        for line in abnormal_report:
-            if not line or not isinstance(line, str):
-                continue
-            if '❌异常：' in line:
-                status = 'fail'
-                content = line.split('❌异常：')[-1].strip()
-            elif '⚠️警告：' in line:
-                status = 'warn'
-                content = line.split('⚠️警告：')[-1].strip()
-            else:
-                continue
-            parts = content.split('|')
-            if len(parts) >= 3:
-                uid_index = parts[0].strip() or '无'
-                name = parts[1].strip() or '无'
-                detail = '|'.join(parts[2:]).strip()
-                detail = detail.replace('\n', ' ').replace('\r', ' ').replace(',', '，')
-                if len(detail) > 500:
-                    detail = detail[:500] + "..."
-                csv_rows.append([uid_index, name, status, detail])
-                valid_count += 1
-            else:
-                csv_rows.append([content, '', status, ''])
-                valid_count += 1
-
-        if valid_count > 0:
-            with open(csv_report_path, 'w', encoding='utf-8-sig', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerows(csv_rows)
-            self.log(f"📊 CSV报告已生成：{csv_report_path} (共{valid_count}条异常/警告记录)", "INFO")
-            if self._get_bool('auto_open_batch_report', False):
-                self._open_dir(OUTPUT_DIR)
-        else:
+        if not uid_rows:
             self.log("📊 未发现异常或警告，不生成CSV报告", "INFO")
+            return
+
+        csv_rows = ReportRenderer.build_batch_csv_rows(uid_rows)
+        with open(csv_report_path, 'w', encoding='utf-8-sig', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerows(csv_rows)
+        self.log(f"📊 CSV报告已生成：{csv_report_path} (共{len(uid_rows)}条异常/警告记录)", "INFO")
+        if self._get_bool('auto_open_batch_report', False):
+            self._open_dir(OUTPUT_DIR)
 
     # ---------- 设置动作 ----------
     def _reset_settings(self):
