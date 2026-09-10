@@ -637,7 +637,6 @@ class App:
                 if st in ("网络异常", "解析失败"):
                     self.fail_count += 1
                     self.fail_list.append((uid, idx, out, st, ""))
-                    self.log_error(f"❌ UID {uid} 存档 {idx}: {st}")
 
     async def _retry_fails(self):
         normal = [x for x in self.fail_list if x[4] not in ("临时封禁", "永久封禁")]

@@ -7,10 +7,16 @@ main (γ 合并版) v3.0.0 —— 数据检测工具（军队/公会成员存档
   1. 📄 存档封禁检测    SlotBanCache：递归扫描所选目录下所有 *_details.csv（下载工具产物）
                        （兼容“存档/标题/状态/封禁状态”与旧“槽位/名称/状态”两种表头）
   2. 🆔 UID 验证        文件名 UID/Index/Name + 文件内 un2/uu2 + uidMd5 三重校验，返回理论/实际
+                       并单独指出 index 不一致（理论UID_Index ≠ 实际UID_Index）
   3. 🚫 作弊检测        isZuobiB 标记 + zuobiReason 原因联动
   4. 👑 VIP权限检测      vip 节点 m 权限越界
   5. 💰 金币消费检测     bin 价格表解密 → 全部消费明细 + 高价/高频预警
   6. 💎 VIP联合检测      按同一 UID 累计消费估算，判断“覆盖存档”与超额度消耗（修复原β计算bug）
+
+批量导出（按 UID 汇总）：
+  • 同一 UID（服务器UID）下多个 uid_index 合并为一份 *_异常详情.txt
+  • CSV 每行对应一个 UID，“UID_Index”列汇总列出该 UID 下全部 index
+  • 文件中单独列出“🔢 index 异常单独指出”，标注理论/实际不一致的存档
 
 界面：主页(单文件检测 / 批量检测 / 报告导出 / 打开下载工具) + 设置 + 致谢
 运行目录：inputdata/ outputdata/ test/ ；读取 config.ini(Settings)
@@ -869,6 +875,9 @@ class AppDetector:
         self.current_results = []
         self.current_file_path = ""
         self.current_uid_info = ""
+        self.current_theory_uid_index = "无"
+        self.current_actual_uid_index = "无"
+        self.current_index_mismatch = False
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         self._ensure_dirs()
@@ -1431,10 +1440,23 @@ class AppDetector:
                                 "msg": "✅ 未检测到存档封禁"})
             extra['ban_reason'] = ban_reason
 
-        # 1. UID 验证
+        # 1. UID 验证（附带“理论/实际 index 是否一致”的单点异常提示）
         uid_res = DetectionEngine.check_uid_md5_advanced(file_path)
+        theory_uid_index = uid_res.get('file_uid_index') or '无'
+        actual_uid_index = uid_res.get('inner_uid_index') or '无'
+        index_mismatch = (theory_uid_index != '无' and actual_uid_index != '无'
+                          and theory_uid_index != actual_uid_index)
+        if index_mismatch:
+            uid_res = dict(uid_res)
+            uid_res['msg'] = (uid_res.get('msg') or '') + \
+                f"\n🔢 【index 异常】理论 {theory_uid_index} / 实际 {actual_uid_index} 不一致"
+            if uid_res.get('status') == 'pass':
+                uid_res['status'] = 'fail'
         results.append(uid_res)
         extra['uid_res'] = uid_res
+        extra['theory_uid_index'] = theory_uid_index
+        extra['actual_uid_index'] = actual_uid_index
+        extra['index_mismatch'] = index_mismatch
 
         # 2. 作弊检测
         cheat_res = DetectionEngine.check_cheat_stream(file_path)
@@ -1492,6 +1514,9 @@ class AppDetector:
             self.current_uid_info = uid_res.get('file_uid')
         else:
             self.current_uid_info = uid_res.get('inner_uid') or ""
+        self.current_theory_uid_index = extra.get('theory_uid_index') or '无'
+        self.current_actual_uid_index = extra.get('actual_uid_index') or '无'
+        self.current_index_mismatch = bool(extra.get('index_mismatch'))
 
         for res in results:
             if isinstance(res, dict):
@@ -1515,7 +1540,13 @@ class AppDetector:
         with open(report_path, 'w', encoding='utf-8') as f:
             f.write(f"检测文件：{self.current_file_path}\n")
             f.write(f"检测时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"UID：{self.current_uid_info}\n\n")
+            f.write(f"UID：{self.current_uid_info}\n")
+            f.write(f"🔢 理论UID_Index：{self.current_theory_uid_index}\n")
+            f.write(f"🔢 实际UID_Index：{self.current_actual_uid_index}\n")
+            if self.current_index_mismatch:
+                f.write(f"⚠️ index 异常：理论 {self.current_theory_uid_index} / "
+                        f"实际 {self.current_actual_uid_index} 不一致\n")
+            f.write("\n")
             f.write("=" * 50 + "\n\n")
             for res in self.current_results:
                 if isinstance(res, dict):
@@ -1531,6 +1562,128 @@ class AppDetector:
             self.log(f"📄 检测报告已生成：{report_path}", "INFO")
         else:
             messagebox.showinfo("完成", f"报告已保存：\n{report_path}")
+
+    # ---------- 异常详情汇总辅助 ----------
+    @staticmethod
+    def _collect_file_issues(res):
+        """收集单个文件的详情日志与异常摘要。
+        返回 (detail_lines, fail_msgs, warn_msgs)。"""
+        detail_lines, fail_msgs, warn_msgs = [], [], []
+        for item in res.get('results', []):
+            if not isinstance(item, dict):
+                continue
+            title = item.get('title', '检测项')
+            status = item.get('status', 'pass')
+            msg = item.get('msg', '')
+            if status not in ('fail', 'warn'):
+                continue
+
+            # 智能摘要
+            short_msg = ""
+            if title == '金币消费检测':
+                for line in msg.split('\n'):
+                    ls = line.strip()
+                    if not ls:
+                        continue
+                    if (any(k in ls for k in ['✅', '⚠️', '🚨', '未发现', '高价物品', '高频购买', '💰'])
+                            and not ls.startswith('-') and not ls.startswith(' ')):
+                        short_msg = ls
+                        break
+                if not short_msg:
+                    for line in msg.split('\n'):
+                        ls = line.strip()
+                        if ls and not ls.startswith('-') and not ls.startswith('='):
+                            short_msg = ls
+                            break
+                if not short_msg:
+                    short_msg = "消费检测发现高价值或高频购买行为" if ('⚠️' in msg or '🚨' in msg) \
+                        else "消费检测完成"
+            else:
+                for line in msg.split('\n'):
+                    ls = line.strip()
+                    if ls:
+                        short_msg = ls
+                        break
+
+            if not short_msg:
+                short_msg = f"[{title}] 检测异常（详细请查看详情文件）"
+            elif len(short_msg) > 150:
+                short_msg = short_msg[:150] + "..."
+
+            detail_lines.append(f"--- [{title}] ---")
+            detail_lines.append(msg)
+            detail_lines.append("")
+            if status == 'fail':
+                fail_msgs.append(short_msg)
+            elif status == 'warn':
+                warn_msgs.append(short_msg)
+        return detail_lines, fail_msgs, warn_msgs
+
+    @staticmethod
+    def _index_tag(file_uid_index, inner_uid_index):
+        """判断单个存档 index 是否异常，返回 (是否异常, 描述文本)。"""
+        theory = file_uid_index or '无'
+        actual = inner_uid_index or '无'
+        if theory != '无' and actual != '无' and theory != actual:
+            return True, f"理论 {theory} ≠ 实际 {actual}"
+        return False, ""
+
+    def _write_uid_detail_file(self, uid, items):
+        """将同一 UID 下所有异常存档汇总为一份详情文件。
+        items: [{fname,theory,actual,name,cost,status,reason,index_mismatch,index_tag,detail_lines}]"""
+        detail_dir = os.path.join(OUTPUT_DIR, "异常详情")
+        os.makedirs(detail_dir, exist_ok=True)
+
+        uid_indexes = sorted({it['theory'] for it in items if it['theory'] != '无'})
+        total_cost = sum(it['cost'] for it in items)
+        uid_status = 'FAIL' if any(it['status'] == 'fail' for it in items) else 'WARN'
+        mismatch_items = [it for it in items if it['index_mismatch']]
+
+        lines = ["=" * 60,
+                 "📄 存档异常详情报告（同一UID汇总）",
+                 "=" * 60,
+                 "",
+                 f"🆔 UID：{uid}",
+                 f"📁 UID_Index：{', '.join(uid_indexes) if uid_indexes else '无'}",
+                 f"📂 异常存档数：{len(items)} 个",
+                 f"🔍 检测结果：{uid_status}",
+                 f"💰 消费金额(该UID异常存档合计)：{total_cost}",
+                 "📄 涉及文件：" + "、".join(it['fname'] for it in items),
+                 ""]
+
+        # index 异常单独指出
+        if mismatch_items:
+            lines.append("🔢 【index 异常单独指出】")
+            for it in mismatch_items:
+                extra_name = f" | Name：{it['name']}" if it['name'] else ""
+                lines.append(f"   • {it['fname']} | {it['index_tag']}{extra_name}")
+        else:
+            lines.append("🔢 【index 异常单独指出】：未发现 index 不一致")
+        lines.append("")
+
+        for it in sorted(items, key=lambda x: x['theory']):
+            lines.append("-" * 60)
+            lines.append(f"📄 原始文件：{it['fname']}")
+            lines.append(f"📁 理论UID_Index：{it['theory']}")
+            lines.append(f"📄 实际UID_Index：{it['actual']}")
+            if it['name']:
+                lines.append(f"📛 Name：{it['name']}")
+            lines.append(f"💰 消费金额：{it['cost']}")
+            lines.append(f"🔍 检测结果：{it['status'].upper()}")
+            if it['index_mismatch']:
+                lines.append(f"🔢 index 异常：{it['index_tag']}")
+            lines.append(f"📝 异常摘要：{it['reason']}")
+            lines.append("")
+            lines.append("📋 详细检测日志:")
+            lines.append("")
+            lines.append("\n".join(it['detail_lines']) if it['detail_lines'] else "（无详细日志）")
+            lines.append("")
+
+        safe_uid = re.sub(r'[<>:"/\\|?*]', '_', str(uid))
+        detail_path = os.path.join(detail_dir, f"{safe_uid}_异常详情.txt")
+        with open(detail_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        return detail_path
 
     # ---------- 批量检测 ----------
     def _batch_detect_folder(self):
@@ -1615,121 +1768,79 @@ class AppDetector:
                     fail += 1
 
         self.log("📝 开始生成异常详情文件...", "INFO")
-        detail_dir = os.path.join(OUTPUT_DIR, "异常详情")
-        os.makedirs(detail_dir, exist_ok=True)
-        abnormal_report = []   # 用于 CSV 的行
+        abnormal_report = []          # 用于 CSV 的行（按 UID 汇总）
+        uid_group = {}                # {uid: [每个存档的异常信息]} 同一UID汇总
 
-        # α 风格：按单个 XML 文件输出详情
+        # α 风格：按 UID 汇总输出详情（同一 UID 下多个 uid_index 合并为一份文件）
         for file_path, res in file_result_map.items():
             fname = os.path.basename(file_path)
-            file_status = res['overall']
-            if file_status not in ('fail', 'warn'):
+            if res['overall'] not in ('fail', 'warn'):
                 continue
 
-            file_uid = res.get('file_uid', '')
-            file_index = res.get('file_index', '')
             file_name = res.get('file_name', '')
             file_uid_index = res.get('file_uid_index', '')
             inner_uid_index = res.get('inner_uid_index', '')
-            display_name = file_name or ''
-            total_cost = res.get('total_cost', 0)
+            # 汇总 UID：优先服务器UID（文件名首段），其次文件内UID
+            group_uid = res.get('uid') or res.get('file_uid') or res.get('inner_uid') or 'unknown'
 
-            combined_fail_msgs = []
-            combined_warn_msgs = []
-            detail_lines = []
+            detail_lines, fail_msgs, warn_msgs = self._collect_file_issues(res)
 
-            for item in res['results']:
-                if not isinstance(item, dict):
-                    continue
-                title = item.get('title', '检测项')
-                status = item.get('status', 'pass')
-                msg = item.get('msg', '')
-                if status not in ('fail', 'warn'):
-                    continue
-
-                # 智能摘要
-                short_msg = ""
-                if title == '金币消费检测':
-                    for line in msg.split('\n'):
-                        ls = line.strip()
-                        if not ls:
-                            continue
-                        if (any(k in ls for k in ['✅', '⚠️', '🚨', '未发现', '高价物品', '高频购买', '💰'])
-                                and not ls.startswith('-') and not ls.startswith(' ')):
-                            short_msg = ls
-                            break
-                    if not short_msg:
-                        for line in msg.split('\n'):
-                            ls = line.strip()
-                            if ls and not ls.startswith('-') and not ls.startswith('='):
-                                short_msg = ls
-                                break
-                    if not short_msg:
-                        short_msg = "消费检测发现高价值或高频购买行为" if ('⚠️' in msg or '🚨' in msg) \
-                            else "消费检测完成"
-                else:
-                    for line in msg.split('\n'):
-                        ls = line.strip()
-                        if ls:
-                            short_msg = ls
-                            break
-
-                if not short_msg:
-                    short_msg = f"[{title}] 检测异常（详细请查看详情文件）"
-                elif len(short_msg) > 150:
-                    short_msg = short_msg[:150] + "..."
-
-                detail_lines.append(f"--- [{title}] ---")
-                detail_lines.append(msg)
-                detail_lines.append("")
-                if status == 'fail':
-                    combined_fail_msgs.append(short_msg)
-                elif status == 'warn':
-                    combined_warn_msgs.append(short_msg)
-
-            if combined_fail_msgs:
-                file_reason = "；".join(combined_fail_msgs)
+            if fail_msgs:
+                file_reason = "；".join(fail_msgs)
                 file_status = 'fail'
-            elif combined_warn_msgs:
-                file_reason = "；".join(combined_warn_msgs)
+            elif warn_msgs:
+                file_reason = "；".join(warn_msgs)
                 file_status = 'warn'
             else:
                 continue
 
-            safe_display_name = re.sub(r'[<>:"/\\|?*]', '_', display_name) if display_name else 'unknown'
-            detail_filename = f"{file_uid_index}_{safe_display_name}_异常详情.txt" if file_uid_index \
-                else f"{safe_display_name}_异常详情.txt"
-            detail_path = os.path.join(detail_dir, detail_filename)
+            index_mismatch, index_tag = self._index_tag(file_uid_index, inner_uid_index)
 
-            with open(detail_path, "w", encoding="utf-8") as f:
-                f.write("=" * 60 + "\n")
-                f.write("📄 异常详情报告\n")
-                f.write("=" * 60 + "\n\n")
-                f.write(f"📄 原始文件：{fname}\n")
-                f.write(f"📁 理论UID_Index：{file_uid_index if file_uid_index else '无'}\n")
-                f.write(f"📄 实际UID_Index：{inner_uid_index if inner_uid_index else '无'}\n")
-                if file_name:
-                    f.write(f"📛 Name：{file_name}\n")
-                f.write(f"💰 消费金额：{total_cost}\n")
-                f.write(f"🔍 检测结果：{file_status.upper()}\n")
-                f.write(f"📝 异常摘要：{file_reason}\n")
-                f.write("\n" + "=" * 60 + "\n")
-                f.write("📋 详细检测日志:\n")
-                f.write("=" * 60 + "\n\n")
-                f.write("\n".join(detail_lines) if detail_lines else "（无详细日志）\n")
+            uid_group.setdefault(group_uid, []).append({
+                'fname': fname,
+                'name': file_name or '',
+                'theory': file_uid_index or '无',
+                'actual': inner_uid_index or '无',
+                'cost': res.get('total_cost', 0),
+                'status': file_status,
+                'reason': file_reason,
+                'index_mismatch': index_mismatch,
+                'index_tag': index_tag,
+                'detail_lines': detail_lines,
+            })
 
-            # CSV 行
-            safe_reason = file_reason.replace('\n', ' ').replace('\r', ' ').strip()
-            if len(safe_reason) > 500:
-                safe_reason = safe_reason[:500] + "..."
-            csv_theory = file_uid_index or '无'
-            csv_actual = inner_uid_index or '无'
-            csv_name = file_name or '无'
-            if file_status == 'fail':
-                abnormal_report.append(f"❌异常：{csv_theory}|{csv_actual}|{csv_name}|{safe_reason}")
+        # 逐 UID 输出：一份汇总详情文件 + 一行 CSV
+        for uid, items in uid_group.items():
+            self._write_uid_detail_file(uid, items)
+
+            uid_fail = any(it['status'] == 'fail' for it in items)
+            uid_indexes = sorted({it['theory'] for it in items if it['theory'] != '无'})
+            display_indexes = ", ".join(uid_indexes) if uid_indexes else '无'
+            multi = len(items) > 1
+
+            # 异常 index 单独指出（理论UID_Index 与实际UID_Index 不一致的存档）
+            reason_parts = []
+            mismatch_parts = [f"{it['theory']}≠{it['actual']}"
+                              for it in items if it['index_mismatch']]
+            if mismatch_parts:
+                reason_parts.append("🔢 index异常：" + "；".join(mismatch_parts))
+            elif multi:
+                reason_parts.append("🔢 各存档index均正常")
+
+            for it in items:
+                prefix = f"[{it['theory']}] " if multi else ""
+                reason_parts.append(f"{prefix}{it['reason']}")
+            uid_reason = "；".join(reason_parts).replace('\n', ' ').replace('\r', ' ').strip()
+            if len(uid_reason) > 500:
+                uid_reason = uid_reason[:500] + "..."
+
+            uid_name = items[0]['name'] or '无'
+            if uid_fail:
+                abnormal_report.append(f"❌异常：{display_indexes}|{uid_name}|{uid_reason}")
             else:
-                abnormal_report.append(f"⚠️警告：{csv_theory}|{csv_actual}|{csv_name}|{safe_reason}")
+                abnormal_report.append(f"⚠️警告：{display_indexes}|{uid_name}|{uid_reason}")
 
+        self.log(f"📝 已按UID汇总生成 {len(uid_group)} 份异常详情文件", "INFO")
         self._generate_batch_report(abnormal_report, success, warn, fail, total)
         self.log(f"批量检测结束\n✅ 通过:{success} ⚠️ 警告:{warn} ❌ 异常:{fail} | 总计:{total}", "PASS")
 
@@ -1806,12 +1917,12 @@ class AppDetector:
         }
 
     def _generate_batch_report(self, abnormal_report, success, warn, fail, total):
-        """生成批量检测 CSV 报告（列：理论uid_index/实际uid_index/Name/状态/异常摘要）"""
+        """生成批量检测 CSV 报告（按 UID 汇总；列：UID_Index/Name/状态/异常摘要）"""
         report_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_report_name = f"批量检测报告_{report_time}.csv"
         csv_report_path = os.path.join(OUTPUT_DIR, csv_report_name)
 
-        csv_rows = [['理论uid_index', '实际uid_index', 'Name', '状态', '异常摘要']]
+        csv_rows = [['UID_Index', 'Name', '状态', '异常摘要']]
         valid_count = 0
         for line in abnormal_report:
             if not line or not isinstance(line, str):
@@ -1825,18 +1936,17 @@ class AppDetector:
             else:
                 continue
             parts = content.split('|')
-            if len(parts) >= 4:
-                theory_uid = parts[0].strip() or '无'
-                actual_uid = parts[1].strip() or '无'
-                name = parts[2].strip() or '无'
-                detail = '|'.join(parts[3:]).strip()
+            if len(parts) >= 3:
+                uid_index = parts[0].strip() or '无'
+                name = parts[1].strip() or '无'
+                detail = '|'.join(parts[2:]).strip()
                 detail = detail.replace('\n', ' ').replace('\r', ' ').replace(',', '，')
                 if len(detail) > 500:
                     detail = detail[:500] + "..."
-                csv_rows.append([theory_uid, actual_uid, name, status, detail])
+                csv_rows.append([uid_index, name, status, detail])
                 valid_count += 1
             else:
-                csv_rows.append([content, '', '', status, ''])
+                csv_rows.append([content, '', status, ''])
                 valid_count += 1
 
         if valid_count > 0:
