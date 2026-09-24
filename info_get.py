@@ -42,30 +42,41 @@ import csv
 import configparser
 from pathlib import Path
 import time
+import app_paths
 
 # ================= 配置区域 =================
-CONFIG_FILE = "config.ini"
+# 路径统一以“程序所在目录”为基准（见 app_paths），从任何目录启动均读写同一份配置，
+# 不再依赖 os.getcwd()（旧版从上级目录启动时会另建一套 config/test）。
+CONFIG_FILE = app_paths.in_program_dir("config.ini")
+DEFAULT_WORK_DIR = app_paths.in_program_dir("test")
 DEFAULT_GAME_ID = "100027788"
 GAMEID = DEFAULT_GAME_ID
 
 
-def _get_work_dir():
-    """读取统一工作目录(兼容旧版 temp_dir 键)"""
-    if not os.path.exists(CONFIG_FILE):
-        return os.path.join(os.getcwd(), "test")
+def get_work_dir():
+    """读取统一工作目录（兼容旧版 temp_dir 键）。
+
+    每次调用都重新读 config.ini（不缓存），主程序修改 work_dir 后无需重启；
+    相对路径按程序目录解析，兼容“main\\test”这类历史写法。
+    """
+    work_dir = None
+    if os.path.exists(CONFIG_FILE):
+        try:
+            config = configparser.ConfigParser()
+            config.read(CONFIG_FILE, encoding='utf-8-sig')
+            work_dir = config.get('Settings', 'work_dir', fallback=None)
+            if not work_dir:
+                work_dir = config.get('Settings', 'temp_dir', fallback=None)
+        except Exception:
+            work_dir = None
+    resolved = app_paths.resolve(work_dir, DEFAULT_WORK_DIR)
     try:
-        config = configparser.ConfigParser()
-        config.read(CONFIG_FILE, encoding='utf-8-sig')
-        work_dir = config.get('Settings', 'work_dir', fallback=None)
-        if not work_dir:
-            work_dir = config.get('Settings', 'temp_dir', fallback='test')
-        os.makedirs(work_dir, exist_ok=True)
-        return work_dir
-    except Exception:
-        return os.path.join(os.getcwd(), "test")
+        os.makedirs(resolved, exist_ok=True)
+    except OSError:
+        return resolved
+    return resolved
 
 
-BASE_SAVE_DIR = _get_work_dir()
 RAW_SUB_DIR = "raw"
 MAX_CONCURRENT_TASKS = 8       # 槽位级并发（单账号内 8 槽并行，等同单UID下载）
 MAX_CONCURRENT_ACCOUNTS = 2    # 批量时同时下载的账号数（账号内仍 8 槽并行，控制总请求量防封）
@@ -256,7 +267,7 @@ class SaveArchiver:
         """整账号全存档下载（8 槽位），写 XML + <uid>_details.csv。
         返回 results 列表（每槽位 dict，含 status_text/ban_status）"""
         if uid_folder is None:
-            uid_folder = os.path.join(BASE_SAVE_DIR, uid)
+            uid_folder = os.path.join(get_work_dir(), uid)
         os.makedirs(uid_folder, exist_ok=True)
         gamekey = self.calculate_gamekey()
 
@@ -687,13 +698,14 @@ class App:
         self.log_warn("正在停止...")
 
     def _out_dir_for(self, t, sub=None):
-        """返回任务的输出uid目录"""
+        """返回任务的输出uid目录（基准目录取自最新配置的 work_dir）。"""
+        base_save_dir = get_work_dir()
         uid = t[1]
         if sub:
-            return os.path.join(BASE_SAVE_DIR, sub, uid)
+            return os.path.join(base_save_dir, sub, uid)
         if self.task_source_file:
-            return os.path.join(BASE_SAVE_DIR, self.task_source_file.stem, uid)
-        return os.path.join(BASE_SAVE_DIR, uid)
+            return os.path.join(base_save_dir, self.task_source_file.stem, uid)
+        return os.path.join(base_save_dir, uid)
 
     def run_precise_async(self):
         loop = asyncio.new_event_loop()
