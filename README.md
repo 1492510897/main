@@ -82,6 +82,17 @@ detect.has_gui(), detect.has_crypto()   # 运行环境能力探测
 - `auto_restore` / `auto_open_dir` / `auto_uid_from_filename` / `export_full_details` /
   `auto_open_batch_report`：界面勾选项
 
+## � VIP 二重检测（gift.vv ↔ upLevelObj）
+
+游戏在**导入存档时**把 `vip.upLevelObj` 的首次快照写入 `gift.vv`（AMF3 + base64），
+此后每次读取都用它自校验（`PlayerSave.getZuobiStr` → `ObjectMethod.samePan`）。
+改档者通常只改其中一处，故本工具把它作为独立于「m 权限越界」的第二重判据：
+
+- `gift.vv` 解码结果与当前 `upLevelObj` **不一致** → 判 `fail`，并列出差异键；
+- `vv=no`（编码为空时的哨兵）却已有 `VIPn`（n>0） → 判 `fail`；
+- **版本门槛**：`versionNumber >= 35.5` 才判定（老版本无此机制）；
+- 快照缺失 / 结构无法识别 → **跳过，不判定**（不误报）。
+
 ## 💎 资产差值检测（时装 / 载具 / 特殊零件）
 
 ★ **重点不是估值，而是找差值** —— 即档内持有量与应有总量对不上（疑似异常修改存档）。
@@ -111,7 +122,15 @@ pycryptodome  requests  aiohttp  (tkinter 为 Python 自带)
 
 ## 📝 批量检测报告格式
 
-`outputdata/批量检测报告_<时间戳>.csv` 列：
-`理论uid_index | 实际uid_index | Name | 状态(fail/warn) | 异常摘要`
+`outputdata/批量检测报告_<时间戳>.csv` —— **一行 = 一个存档 index**（便于按槽位筛选）：
 
-`outputdata/异常详情/<理论uid_index>_<Name>_异常详情.txt` 为每个异常 XML 的完整检测日志。
+`UID_Index | Name | VIP | 状态 | 涉及存档数 | 封禁槽位 | 时装 | 载具 | 特殊零件 | 资产价值 | 资产异常摘要 | 异常摘要`
+
+- `UID_Index` 采用 `<uid>_<index>_<名字>` 形式，每个异常存档独立成行；
+- 状态 / 封禁槽位 / 资产各列均为**该槽位自身**口径（不再取同 UID 各档的最大值，
+  故同一账号的多行可精确定位到具体档）；
+- `涉及存档数` = 该 UID 的异常档总数；
+- 未参与检测的封禁槽位（服务器未返回内容、无 XML）各自单独成行（状态 `fail`，
+  封禁槽位列写明原因），保证封禁信息不因逐槽位拆分而丢失。
+
+`outputdata/异常详情/<uid>_异常详情.txt` 为该账号全部异常档的完整检测日志（按 UID 汇总）。

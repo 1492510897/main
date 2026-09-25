@@ -9,18 +9,24 @@ main (γ 合并版) v3.1.0 —— 数据检测工具（军队/公会成员存档
   2. 🆔 UID 验证        文件名 UID/Index/Name + 文件内 un2/uu2 + uidMd5 三重校验，返回理论/实际
                        并单独指出 index 不一致（理论UID_Index ≠ 实际UID_Index）
   3. 🚫 作弊检测        isZuobiB 标记 + zuobiReason 原因联动
-  4. 👑 VIP权限检测      vip 节点 m 权限越界
-  5. 💰 金币消费检测     bin 价格表解密 → 全部消费明细 + 高价/高频预警
+  4. 👑 VIP权限检测      vip 节点 m 权限越界 + gift.vv 快照二重检测
+                       （gift.vv = 导入存档时 upLevelObj 的 AMF3 快照，
+                         与当前 upLevelObj 比对；游戏自 35.5 起自带此校验）
+  5. 💰 金币消费检测     价格表（inputdata/good_items.csv）→ 全部消费明细 + 高价/高频预警
+                       （旧版加密价格表 *.bin 仍可读取，自动识别）
   6. 💎 VIP联合检测      按同一 UID 累计消费估算，判断“覆盖存档”与超额度消耗（修复原β计算bug）
   7. 🧩 资产差值检测     ★ 重点不是估值，而是找出「持有量 ≠ 应有总量」的差值
                        （差值 > 0 = 来源说不清，疑似异常修改存档，交人工复核）：
                          差值 = 持有量 − 应有总量
                          应有总量 = 付费次数 + 免费额度（活动/掉落/赠送等）
-                         稀有零件：应有 = 付费 + 券购 + 塔领 + 活动修正
+                         稀有零件：应有 = 付费 + 券购 + 塔领 + 已领等级礼包 + 活动修正
+                         （三种「芯」直接按版本上限判：暗金 1 / 紫金 2 / 氩金 1，
+                           见 PARTS_VERSION_LIMIT 与 LEVEL_GIFT_PARTS）
                        付费载具 / 付费时装与购买记录(pay.obj)双向比对：
                          「未购买但存档内拥有」与「购买了但存档内无」会输出，
                          能正常匹配（购买记录 ≥ 持有量）的不输出
                        免费额度 / 活动修正见 inputdata/free_quota.ini，可自行调整
+                       图鉴内常规载具无价属正常，不显示（稀有载具仍单列区块）
                        • 节点：equip/equipBag/equipHouse、partsBag、arms/armsBag/armsHouse
                          （含武器镶嵌位 partsSave），以及队友存档 more/moreBag→SAVE
                        • 零件按 objType 分类（权威定义见 partsType.ts 注释），
@@ -51,6 +57,8 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import csv
 import io
+import queue
+import struct
 
 import app_paths
 
@@ -76,9 +84,10 @@ except ImportError:                  # 缺少 pycryptodome：仅金币消费检�
     AES = None
     unpad = None
 
-# 缺少 pycryptodome 时的统一提示（价格表 bin 需 AES 解密）
+# 缺少 pycryptodome 时的统一提示（仅解密 *.bin 过往版本价格表时需要）
 MISSING_CRYPTO_MSG = ("缺少 pycryptodome 依赖（pip install pycryptodome），"
-                      "无法解密价格表，金币消费检测不可用")
+                      "无法解密 *.bin 过往版本价格表；"
+                      "改用最新版 CSV 价格表（inputdata/good_items.csv）不受影响")
 
 
 def has_gui():
@@ -117,12 +126,19 @@ INPUT_DIR = app_paths.in_program_dir("inputdata")
 OUTPUT_DIR = app_paths.in_program_dir("outputdata")
 TEST_DIR = app_paths.in_program_dir("test")
 CONFIG_FILE = app_paths.in_program_dir("config.ini")
-DEFAULT_BIN_PATH = os.path.join(INPUT_DIR, "v36.11_pro.bin")
+
+# ★ 价格表 = inputdata/good_items.csv（最新版本，明文直接读取）。
+#   它同时供「金币消费检测」与「时装/载具/零件差值检测」使用：
+#       记录ID(propId), 金额(price), 物品（cNname）, 英文名(name), 分类, , 备注
+#   同目录下的 *.bin 是**过往版本**的加密二进制（由 create/DATE_CREATE.py 生成），
+#   仍可读取（自动按旧密钥解密），但不再是默认来源 —— 旧版表缺少英文名，
+#   且不含后续修正（如 4327 的 ID 复用：噬原时装 960 / 噬魂时装 1500）。
+GOODS_CSV = os.path.join(INPUT_DIR, "good_items.csv")   # id/价值对照表（最新版本）
+GOODS_CSV_REL = os.path.join("inputdata", "good_items.csv")   # 相对写法（供资源目录优先解析）
+DEFAULT_BIN_PATH = GOODS_CSV            # 价格表默认路径（沿用旧名/配置键 bin_path）
 VERSION = "3.1.0"
 
 # ---- 资产检测（时装 / 载具 / 稀有零件）----
-GOODS_CSV = os.path.join(INPUT_DIR, "good_items.csv")   # id/价值对照表
-GOODS_CSV_REL = os.path.join("inputdata", "good_items.csv")   # 相对写法（供资源目录优先解析）
 ASSET_FASHION = 'fashion'
 ASSET_VEHICLE = 'vehicle'
 ASSET_PARTS = 'parts'
@@ -247,6 +263,32 @@ FREE_QUOTA_FILE_REL = os.path.join("inputdata", "free_quota.ini")   # 相对写�
 # 不设界面参数，可在 free_quota.ini 的 [default] min_excess_value 中调整。
 DEFAULT_ABNORMAL_MIN_VALUE = 0
 
+# ---- ★ 时装升级（特殊情况：一次升级 = 两笔购买记录）----
+# 机制：先买基础时装 A，再买「A时装>B时装」的升级道具，使用后 A 被消耗 → 得到 B。
+#  所以 pay.obj 里会有**两条**记录：A 时装（propId）+ 升级道具（propId）；
+#  而存档内只会看到 B（有时还能看到多余的 A/道具）。
+# 判定时要额外给目标时装 B 计一份来源，否则会被误判为“无购买记录”。
+#
+# 数据源：good_items.csv 中分类为「时装升级」的行，名称形如
+#     「白狐心零时装>白狐时装」
+# 注意：升级道具的英文名列为空（游戏中当作道具而非时装），故只能靠中文名解析。
+# 另：同一升级目标会有多个 propId（如 4586=380 金 / 4594=500 金），全部生效。
+FASHION_UPGRADE_CATEGORY = '时装升级'
+
+
+def parse_fashion_upgrade(text):
+    """解析「A时装>B时装」→ (基础名, 目标名)；非升级说明返回 (None, None)。
+
+    「其他时装升级」这种无法确定目标的条目会被排除（返回 None）。
+    """
+    text = (text or '').strip()
+    if '>' not in text:
+        return None, None
+    from_cn, to_cn = (x.strip() for x in text.split('>', 1))
+    if not from_cn or not to_cn or '其他' in from_cn:
+        return None, None        # 占位条目（如「其他时装升级」）无法定位目标
+    return from_cn, to_cn
+
 # ---- 购买记录 ↔ 存档数据：匹配策略与输出精简 ----
 # 「付费载具 / 付费时装」使用 pay.obj 的购买记录双向比对：
 #   • 正常匹配（购买记录 ≥ 持有量）                  → **不输出**
@@ -335,6 +377,72 @@ def _merge_free_quota(*tables):
 
 FREE_QUOTA_PARTS = _merge_free_quota(FREE_QUOTA_PARTS_SHOP, FREE_QUOTA_PARTS_TOWER)
 
+# ---- 等级礼包（levelGift）中的稀有零件奖励 ----
+# 权威：368_XMLOut_levelGiftClass.bin（G:\游戏\爆枪突击\local\ffdec_export\）
+#   <one name="dgcpu1" mustLevel="1"><gift>parts;darkgoldCpu_1;1</gift></one>
+#   <one name="pucpu1" mustLevel="2"><gift>parts;purgoldCpu_1;1</gift></one>
+#   <one name="yacpu1" mustLevel="4"><gift>parts;yagoldCpu_1;1</gift></one>
+# 其余 levelGift 里的 parts 奖励都是普通/特殊零件（loaderParts / huntParts /
+# acidicParts），不参与稀有零件差值判定，故只登记这 3 项。
+# 存档侧：gift.levelGiftObj.{键} = true 表示该礼包**已领取**
+# （与 levelGiftObj 里的 levelGift_35 等等级礼包同一节点，键名与 .bin 的 name 一致）。
+LEVEL_GIFT_PARTS = {
+    'dgcpu1': {'darkgoldCpu': 1},    # 暗金之芯 ×1（需进阶出 1 把暗金武器）
+    'pucpu1': {'purgoldCpu': 1},     # 紫金之芯 ×1（需进阶出 2 把无双武器）
+    'yacpu1': {'yagoldCpu': 1},      # 氩金之芯 ×1（需进阶出 4 把氩金武器）
+}
+
+# ★ 三种「芯」的**版本获取上限**（用户确认）：暗金 1 / 紫金 2 / 氩金 1。
+# 上限 > 礼包份数 的部分来自其它渠道（如 紫金之芯 可由物品合成再得 1 份），
+# 但**总数封顶**，故直接按上限判定更稳：即使存档未记录领奖状态（如人工导入档
+# 可能缺 levelGiftObj）也能正确判超额，且不会因漏登记渠道而误报。
+# 本表存在时优先于「礼包领取状态」动态求和（二者结果一致，见回归验证）。
+PARTS_VERSION_LIMIT = {
+    'darkgoldCpu': 1,
+    'purgoldCpu': 2,
+    'yagoldCpu': 1,
+}
+
+
+# ---- 零件族名归一（★ 修复付费/券购/塔领统计匹配失败）----
+# 存档与价格表两侧的零件标识形态不一致，必须统一到 baseLabel（去 _数字 后缀）：
+#   • 存档 equip/partsBag 里的 name      = "shockParts_3"（带等级后缀）
+#   • pay.obj 经价格表映射后             = "burstParts_1"/"acidicParts_1"（带 _1）
+#   • goods.buyNumObj 的键               = "shockParts_1_p"（带 _1 + 渠道后缀）
+#   • free_quota.ini / TOWER 表          = "shockParts"（纯 baseLabel）
+# 早期实现直接把上述键拿去查表，导致带后缀的键一个都匹配不上 ——
+# 表现为「付费次数、券购次数、塔领份数全部读成 0」，进而把付费零件误判为超额。
+def parts_base_label(name):
+    """零件标识 → baseLabel（去掉 _数字 等级后缀与 _p/_a/_t 等渠道后缀）。"""
+    text = (name or '').strip()
+    if not text:
+        return ''
+    # 先剥渠道后缀（_p 券购 / _a 其它货币 / _t 限时 / _d / _arena / _tax）
+    text = re.sub(r'_(p|a|t|d|arena|tax)$', '', text)
+    # 再剥等级后缀（_1 / _2 ...）
+    return re.sub(r'_\d+$', '', text)
+
+
+def buy_num_of(buy_map, base):
+    """从 goods.buyNumObj 取该零件族在**零件券商店**的实际购买次数。
+
+    券购键为 "<baseLabel>_1_p"；为容纳历史/变体写法，按 baseLabel 归一后
+    汇总所有 `_p` 结尾的键（券购不花黄金，计入「应有总量」）。
+    """
+    base = (base or '').strip()
+    if not base or not buy_map:
+        return 0
+    direct = buy_map.get(f"{base}_1_p")
+    if direct:
+        return direct
+    total = 0
+    for key, num in buy_map.items():
+        if not str(key).endswith('_p'):
+            continue
+        if parts_base_label(key) == base:
+            total += num
+    return total
+
 # 虚天塔各层的零件奖励（TowerDefineCtrl.as 的 giftStr，每层 1 个一阶零件）。
 # 用途：结合存档 tower.gO.saveObj 判断哪些层的奖励**已领取**，
 #       从而把「商店限购 + 已领塔奖励」作为该账号真正的免费额度。
@@ -365,6 +473,11 @@ PARTS_BASE_TO_CN = {
     # 材料合成的稀有零件（配方见文件头：58_XMLOut_thingsComposeClass.bin）
     "purgoldCpu": "紫金之芯", "poisonParts": "生化球", "oldBulletCube": "老弹体",
     "betrayParts": "叛变器", "followParts": "跟踪器",
+    # 等级礼包 / 其它渠道的稀有零件（见 LEVEL_GIFT_PARTS / 133_XMLOut_partsClass.bin）
+    "darkgoldCpu": "暗金之芯", "yagoldCpu": "氩金之芯",
+    "balloonParts": "气球子弹", "pistolCopyParts": "手枪克隆器",
+    "shotgunCopyParts": "散弹克隆器", "frozenParts": "冷冻球",
+    "burstParts": "爆裂弹", "addAiRangeParts": "AI增强镜",
 }
 PARTS_CN_TO_BASE = {cn: base for base, cn in PARTS_BASE_TO_CN.items()}
 
@@ -629,12 +742,103 @@ def decode_text32_number(text, default=None):
     except (TypeError, ValueError):
         return default
 
+
+# ---- AMF3 解码（gift.vv：VIP 购买记录快照）----
+# 游戏导入存档时把 vip.upLevelObj 的**首次快照**以 AMF3 序列化后 base64 写入
+# gift.vv（PlayerSave.inData_byObj），事后用它自校验（PlayerSave.getZuobiStr →
+# ObjectMethod.samePan）：两者不一致即游戏自身的作弊判据。
+# 改档者通常只改其中一处，故本工具取其为 VIP 的第二重判据。
+VIP_VV_MIN_VERSION = 35.5      # 游戏自 35.5 版本起才有该快照机制
+VIP_VV_NO_SNAPSHOT = 'no'      # 编码结果为空时的哨兵值（此时 level>0 也可疑）
+_AMF3_UNDEFINED = object()     # AMF3 undefined 哨兵（与 null 区分）
+
+
+def _amf3_u29(buf, pos):
+    """读取 AMF3 变长整数 u29（最多 4 字节），返回 (值, 新位置)。"""
+    value = 0
+    for _ in range(4):
+        byte = buf[pos]
+        pos += 1
+        value = (value << 7) | (byte & 0x7F)
+        if not byte & 0x80:
+            return value, pos
+    raise ValueError("AMF3 u29 溢出")
+
+
+def _amf3_string(buf, pos, table):
+    """读取 AMF3 字符串（含引用表），返回 (文本, 新位置)。"""
+    head, pos = _amf3_u29(buf, pos)
+    if not head & 1:                    # 0 = 引用字符串表
+        return table[head >> 1], pos
+    size = head >> 1
+    raw = buf[pos:pos + size]
+    if len(raw) != size:
+        raise ValueError("AMF3 字符串截断")
+    text = raw.decode('utf-8', 'replace')
+    table.append(text)
+    return text, pos + size
+
+
+def _amf3_value(buf, pos, table):
+    """读取单个 AMF3 值；仅覆盖本存档出现的类型，其余抛错（调用方跳过判定）。"""
+    marker = buf[pos]
+    pos += 1
+    if marker == 0x00:                  # undefined
+        return _AMF3_UNDEFINED, pos
+    if marker == 0x01:                  # null
+        return None, pos
+    if marker == 0x02:
+        return False, pos
+    if marker == 0x03:
+        return True, pos
+    if marker == 0x04:                  # 整数
+        return _amf3_u29(buf, pos)
+    if marker == 0x05:                  # 双精度浮点
+        return struct.unpack('>d', buf[pos:pos + 8])[0], pos + 8
+    if marker == 0x06:                  # 字符串
+        return _amf3_string(buf, pos, table)
+    raise ValueError(f"AMF3 类型 0x{marker:02x} 未支持")
+
+
+def decode_amf3_object(text):
+    """解码 gift.vv（base64 的 AMF3 动态对象）→ {键: 值}；无法解析返回 None。
+
+    等价 AS3 的 `Base64.decodeObject()`：内容为 `Base64.encodeObject()` 产物，
+    本游戏写入的是 {mNNNN: true} 形式的 VIP 购买记录快照。
+    仅作只读解析；遇到结构外的类型即返回 None，由调用方跳过判定（不误报）。
+    """
+    text = re.sub(r'\s+', '', text or '')
+    if not text:
+        return None
+    try:
+        buf = base64.b64decode(text, validate=True)
+        if not buf or buf[0] != 0x0A:    # AMF3 object marker
+            return None
+        head, pos = _amf3_u29(buf, 1)
+        if not head & 1:                 # 0 = 对象引用（顶层不应出现）
+            return None
+        if (head >> 2) & 1:              # externalizable：结构未知，放弃
+            return None
+        table = []
+        _class_name, pos = _amf3_string(buf, pos, table)
+        result = {}
+        # 密封成员与动态成员在字节流上都是「名 + 值」序列，连续读到空键为止
+        while pos < len(buf):
+            key, pos = _amf3_string(buf, pos, table)
+            if not key:                  # 空键 = 成员列表结束
+                break
+            result[key], pos = _amf3_value(buf, pos, table)
+        return result
+    except (IndexError, ValueError, KeyError, TypeError):
+        return None
+
+
 # 免费时装：活动/初始赠送获取，对照表无售价记录。
 # 存档中确实持有，但既不该计入价值，也不该被当成“对照表覆盖不全”的告警。
 FREE_FASHION_NAMES = (
     "小7时装", "小娜时装", "扶光时装", "望舒时装",
     "红魔时装", "小卡时装", "小隆时装", "小田时装",
-    "小蚁时装", "工人帽", "狼首"
+    "小蚁时装", "工人帽", "狼首" , "蚁人时装", "七号士兵时装",
 )
 # 归一化后的匹配集合（去掉 _数字 后缀等差异，容错“小7时装/小7”写法）
 FREE_FASHION_SET = frozenset(FREE_FASHION_NAMES)
@@ -675,6 +879,41 @@ def is_rare_fashion(cn, en='', table=None):
         return False        # 无对照表时无法判定，交由“未定价”流程处理
     got = tbl.price_of(en, cn, {'时装', '时装(下架)', '时装(升级)'})
     return got is None
+
+
+# ---- ★ ID 复用修正表（按获取时间纠正物品名）----
+# 背景：游戏里同一英文名（/同一 propId）会被后续物品**复用**，旧存档里因此留下
+#       “名字对不上本体”的条目 —— 存档内的 cnName 是当时写入的，之后不再更新。
+# 已知案例（本次调查确认）：
+#   · phage（4327）在 v28.7 上架时的身份是**噬原时装**（960 金），
+#     但仅 **2022-09-22 当天**可获取（随后紧急下架）；
+#     之后该 ID 被改作**噬魂时装**（1500 金）复用，直至 v35.3 删除获取。
+#     实测：只有 2022-09-22 获取的才是真·噬原时装，
+#     其余标着“噬原时装”的条目实际都是噬魂时装（按噬魂 1500 计价）。
+# 结构：{英文名: (修正后中文名, 真名所属的获取日期前缀集合)}
+#   → 获取时间不在集合内时，改按修正后的名字登记。
+ID_REUSE_FIXES = {
+    "phage": ("噬魂时装", ("2022-09-22",)),
+}
+
+
+def id_reuse_fix(en, get_time=''):
+    """按获取时间纠正 ID 复用导致的错误名称；无需修正时返回 None。
+
+    en       : 存档条目的英文名（如 phage）
+    get_time : 获取时间字符串（如 "2022-09-22 16:14:11"）
+    返回 "噬魂时装"（应改用的名字）；本条目就是真名时返回 None。
+    """
+    rule = ID_REUSE_FIXES.get((en or '').strip())
+    if not rule:
+        return None
+    fixed_cn, true_prefixes = rule
+    stamp = (get_time or '').strip()[:10]
+    if not stamp:
+        return fixed_cn    # 无获取时间：无法自证，按复用后的主流名字处理
+    if any(stamp == p for p in true_prefixes):
+        return None        # 属于真名时期 → 保持原名
+    return fixed_cn
 
 
 # ---- 载具家族（进化链）----
@@ -773,9 +1012,56 @@ PAID_VEHICLE_ALIASES = _alias_table(
 RARE_VEHICLE_NAMES = {"虚炎狼": "FireWolfCar", "切割者": "BoneBreaker", "胖哒号": "PandaCar"}
 RARE_VEHICLE_ALIASES = _alias_table(list(RARE_VEHICLE_NAMES.items()))
 
-# 免费载具：可免费获取、无直售价，数量普遍、参考价值低 → 报告不展示明细
-FREE_VEHICLE_NAMES = {"异祖龙": "FlyDragonAir", "异齿虎": "SaberTigerCar", "雷鸣": "Thunder"}
+# 免费载具：可免费获取（活动赠送/初始赠送/副本掉落）、无直售价，
+# 数量普遍、参考价值低 → 报告不展示明细，也不计入资产价值。
+#
+# ★ 完整进化线（源：zzl-Jiang/bqtj-wiki-tools 的 xml/ 与游戏 bin 的
+#   evolutionLabel 字段；族内获取方式一致，故只需登记基点，
+#   进阶体由 classify_vehicle 按家族继承 → free）。已验证的免费链：
+#     • 雷鸣(Thunder)     → 雷霆(Thunderbolt)                        [T2→T4]
+#     • 异齿虎(SaberTigerCar)                                        [T2]
+#     • 异祖龙(FlyDragonAir) → 冰霜祖龙(FrozenDragonAir)              [T1→T2]
+#   注：赤焰/破晓/收割者/挖掘者/沙漠进袭者等链的 bin 字段为
+#       mustCash + 无 shopB（即用黄金/碎片合成获取），不属免费。
+FREE_VEHICLE_NAMES = {
+    "异祖龙": "FlyDragonAir",      # 异祖龙飞行器
+    "异齿虎": "SaberTigerCar",     # 异齿虎坐骑（lottery=15，抽奖/活动获取）
+    "雷鸣": "Thunder",             # 雷鸣（进阶体 雷霆 同族免费）
+}
 FREE_VEHICLE_ALIASES = _alias_table(list(FREE_VEHICLE_NAMES.items()))
+# 免费载具的**完整族内成员**（含进阶体）：用于精准判定与展示，
+# 避免只靠 classify_vehicle 的族内继承而漏掉进阶体。
+FREE_VEHICLE_FAMILY_MEMBERS = {
+    "异祖龙": [("异祖龙", "FlyDragonAir"), ("冰霜祖龙", "FrozenDragonAir")],
+    "异齿虎": [("异齿虎", "SaberTigerCar")],
+    "雷鸣": [("雷鸣", "Thunder"), ("雷霆", "Thunderbolt")],
+}
+
+# ★ 特殊载具的持有量上限（唯一性载具）：正常只能持有 1 个。
+#   年兽（NianCar）由「年兽碎片 NianCarCash」合成，属可免费获取的载具，
+#   但**唯一** —— 存档内多于 1 个即判定异常（直接报 fail，交人工复核）；
+#   恰好 1 个属正常，不输出（与其它免费载具一致，不展示明细）。
+#   键可写中文名或英文名（查表时两者都试）。
+VEHICLE_COUNT_LIMITS = {
+    "年兽": 1,
+    "NianCar": 1,
+    "切割者":2,
+    "BoneBreaker":2,
+    "胖哒号":2,
+    "PandaCar":2,
+}
+
+
+def vehicle_count_limit(cn, en=''):
+    """返回该载具的持有量上限；未登记上限的载具（绝大多数）返回 None（不限）。"""
+    cn = (cn or '').strip()
+    en = re.sub(r"_\d+$", "", (en or '').strip())
+    if cn and cn in VEHICLE_COUNT_LIMITS:
+        return VEHICLE_COUNT_LIMITS[cn]
+    if en and en in VEHICLE_COUNT_LIMITS:
+        return VEHICLE_COUNT_LIMITS[en]
+    return None
+
 
 # 载具列表（即可正常持有的全部载具，共 54 款）：家族 + 单形态。
 # 不含聚合体（见 VEHICLE_FIT）—— 其无法正常获取，出现即属异常。
@@ -1177,6 +1463,66 @@ class ReportRenderer:
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _uid_index_name(uid_index, name):
+        """拼装 uid_index_name 展示形式（无 name 时回退到纯 uid_index）。"""
+        if not uid_index or uid_index == '无':
+            return '无'
+        return f"{uid_index}_{name}" if name else str(uid_index)
+
+    # ---- 槽位级资产摘要（CSV「每 index 一行」用）----
+    @staticmethod
+    def build_slot_asset_summary(asset_res):
+        """把单个存档的资产结果压成该**槽位自身**的摘要（不做 UID 合并）。
+
+        与 check_asset_nodes 的 asset_dict 同口径（载具只计「稀有 + 未匹配的收费」），
+        但按本存档数据计算 —— 供「每 index 一行」的 CSV 使用。
+        返回 {fashion_text, vehicle_text, parts_text, value, reason}；无数据时返回 {}。
+        """
+        if not asset_res or not asset_res.get('kinds'):
+            return {}
+        summary = asset_res['kinds'] or {}
+
+        def _text(kind):
+            data = summary.get(kind) or {}
+            total = data.get('total', 0)
+            if kind != ASSET_VEHICLE:
+                return f"{total}件/{data.get('value', 0)}金"
+            # 载具口径与报告一致：稀有 + 未匹配的收费
+            shown = [r for r in (data.get('items') or {}).values()
+                     if r.get('tag') == 'rare'
+                     or (r.get('tag') == 'paid'
+                         and (not MATCH_PURCHASE_RECORDS
+                              or (r.get('pay') or 0) < r['count']))]
+            cnt = sum(r['count'] for r in shown)
+            val = sum((r.get('price') or 0) * r['count'] for r in shown)
+            return f"{cnt}件/{val}金"
+
+        value = 0
+        for kind in (ASSET_FASHION, ASSET_VEHICLE, ASSET_PARTS):
+            data = summary.get(kind) or {}
+            if kind != ASSET_VEHICLE:
+                value += data.get('value', 0)
+            else:
+                shown = [r for r in (data.get('items') or {}).values()
+                         if r.get('tag') == 'rare'
+                         or (r.get('tag') == 'paid'
+                             and (not MATCH_PURCHASE_RECORDS
+                                  or (r.get('pay') or 0) < r['count']))]
+                value += sum((r.get('price') or 0) * r['count'] for r in shown)
+
+        # 异常摘要：复用该存档自身的 asset_dict.reason（若检测时已生成）
+        reason = ''
+        slot_dict = asset_res.get('asset_dict') or {}
+        reason = slot_dict.get('reason') or ''
+        return {
+            'fashion_text': _text(ASSET_FASHION),
+            'vehicle_text': _text(ASSET_VEHICLE),
+            'parts_text': _text(ASSET_PARTS),
+            'value': value,
+            'reason': reason,
+        }
+
     # ---- 资产报告 ----
     @staticmethod
     def render_asset_result(res, max_details=0):
@@ -1256,13 +1602,18 @@ class ReportRenderer:
                                 f"（{rec['count']}×{rec['level1_equiv']}）")
                 else:
                     held_txt = str(rec['count'])
-                # 应有总量 = 付费 + 券购 + 塔领 + 活动修正
-                parts_of = " + ".join(b for b in (
-                    f"付费 {pay}" if pay else "",
-                    f"券购 {rec['ticket_buy']}" if rec.get('ticket_buy') else "",
-                    f"塔领 {rec['tower_claimed']}" if rec.get('tower_claimed') else "",
-                    f"活动 {adjust}" if adjust else "",
-                ) if b)
+                # 应有总量 = 付费 + 券购 + 塔领 + 礼包 + 活动修正
+                # 特例：登记了版本上限的族（三种「芯」）改为直接报上限
+                if rec.get('version_limit'):
+                    parts_of = f"版本上限 {rec['version_limit']}"
+                else:
+                    parts_of = " + ".join(b for b in (
+                        f"付费 {pay}" if pay else "",
+                        f"券购 {rec['ticket_buy']}" if rec.get('ticket_buy') else "",
+                        f"塔领 {rec['tower_claimed']}" if rec.get('tower_claimed') else "",
+                        f"礼包 {rec['gift_claimed']}" if rec.get('gift_claimed') else "",
+                        f"活动 {adjust}" if adjust else "",
+                    ) if b)
                 lines.append(
                     f"      - [{ASSET_KIND_CN[rec['kind']]}] {name_cn}{lv} "
                     + ("折算一阶当量 " if rec['kind'] == ASSET_PARTS else "持有 ")
@@ -1325,6 +1676,25 @@ class ReportRenderer:
                 lines.append("      - " + ReportRenderer._vehicle_tag_line(rec))
             if omitted:
                 lines.append(f"      …另 {omitted} 项（详见异常详情文件）")
+        # ★ 超量载具（唯一性载具，如 年兽）：持有量 > 上限 → 异常
+        over_limit = res.get('over_limit_vehicles') or []
+        if over_limit:
+            lines.append("  🚨 超量载具（超出持有上限，需人工复核）：")
+            shown, omitted = ReportRenderer._capped(over_limit)
+            for rec in shown:
+                lines.append("      - " + ReportRenderer._over_limit_vehicle_line(rec))
+            if omitted:
+                lines.append(f"      …另 {omitted} 项（详见异常详情文件）")
+        # ★ 未记录载具：不在载具列表内且价格表也无记录（无法核对来源/价值）→ 列出供人工复核
+        # 注：图鉴内常规载具未直售属正常，不显示（稀有载具另有专属区块）。
+        unrecorded = res.get('unrecorded_vehicles') or []
+        if unrecorded:
+            lines.append("  🧾 未记录载具（不在载具列表内且价格表无记录，需人工复核）：")
+            shown, omitted = ReportRenderer._capped(unrecorded)
+            for rec in shown:
+                lines.append("      - " + ReportRenderer._unrecorded_vehicle_line(rec))
+            if omitted:
+                lines.append(f"      …另 {omitted} 项（详见异常详情文件）")
         errors = res.get('errors') or []
         lines.extend(f"  {e}" for e in errors)
         return "\n".join(lines)
@@ -1368,8 +1738,40 @@ class ReportRenderer:
         return " | ".join(bits)
 
     @staticmethod
+    def _over_limit_vehicle_line(rec):
+        """超量载具专用行：名称、持有量、上限（唯一性载具）。"""
+        name = rec['cn'] or rec['name']
+        limit = vehicle_count_limit(rec.get('cn'), rec.get('name'))
+        bits = [f"{name} ×{rec['count']}（上限 {limit}，超出 {rec['count'] - (limit or 0)} 个）"]
+        gt = rec.get('get_time')
+        if gt:
+            bits.append(f"获取时间 {gt}")
+        price = rec.get('price')
+        if price is not None:
+            bits.append(f"单价 {price}金")
+        return " | ".join(bits)
+
+    @staticmethod
+    def _unrecorded_vehicle_line(rec):
+        """未记录载具专用行：名称、数量、所属系列、无价格记录、获取时间。"""
+        name = rec['cn'] or rec['name']
+        bits = [f"{name} ×{rec['count']}"]
+        base = rec.get('base')
+        if base and base != name:
+            bits.append(f"（{base}系列）")
+        bits.append("价格表无记录")
+        gt = rec.get('get_time')
+        if gt:
+            bits.append(f"获取时间 {gt}")
+        return " | ".join(bits)
+
+    @staticmethod
     def _missing_purchase_line(rec):
-        """「购买了但存档内无」专用行：名称、购买记录、存档内持有、缺口与差额。"""
+        """「购买了但存档内无」专用行：名称、购买记录、存档内持有、缺口与差额。
+
+        载具按**家族**聚合判定（购买记录落在基础形态，进化体各自独立成条），
+        故全族口径的行显示「全族持有 N 件（含 X×a、Y×b）」。
+        """
         name = rec['cn'] or rec['name']
         kind = rec.get('kind') or ''
         lv = f" Lv{rec['level']}" if rec.get('level') else ""
@@ -1377,6 +1779,12 @@ class ReportRenderer:
         bits = [f"[{ASSET_KIND_CN[kind]}] {name}{lv}" if kind else f"{name}{lv}"]
         if rec.get('absent'):
             bits.append(f"存档内未见（购买记录 {rec.get('pay') or 0}）")
+        elif rec.get('held_family'):
+            fam = rec.get('family_detail') or ''
+            bits.append(f"全族持有 {rec['held_family']} 件"
+                        + (f"（{fam}）" if fam else "")
+                        + f" < 购买记录 {rec.get('pay') or 0}"
+                        f"，缺 {rec.get('missing', 0)} 份")
         else:
             bits.append(f"持有 {rec.get('count', 0)} < 购买记录 {rec.get('pay') or 0}"
                         f"，缺 {rec.get('missing', 0)} 份")
@@ -1478,42 +1886,70 @@ class ReportRenderer:
     # ---- 批量 CSV ----
     @staticmethod
     def build_batch_csv_rows(uid_rows):
-        """uid_rows: [{uid,indexes,index_display,name,vip_level,status,reason,
-                       multi,items,inactive_bans,asset_summary}] → CSV 行列表
+        """uid_rows → CSV 行列表（★ 一行 = 一个存档 index，便于按槽位筛选）。
 
         列顺序：UID_Index | Name | VIP | 状态 | 涉及存档数 | 封禁槽位 |
-                时装 | 载具 | 稀有零件 | 资产价值 | 资产异常摘要 | 异常摘要
-        UID_Index 列采用 uid_index_name 格式（每个存档自带名称，与 Name 列一一对应）。
+                时装 | 载具 | 特殊零件 | 资产价值 | 资产异常摘要 | 异常摘要
+
+        口径说明（与旧版「每 UID 一行」的差异）：
+          • UID_Index / Name 为该存档自身；
+          • 状态 / 封禁槽位 / 资产各列均为**该槽位自身**口径 —— 不再取 UID 内
+            各档的最大值（旧版多档账号的多行会显示同一份合并数据，无法定位到具体档）；
+          • 涉及存档数 = 该 UID 的异常档总数（便于判断本行在账号内的位置）；
+          • 未参与检测的封禁槽位（服务器未返回内容、无 XML）各自单独成行
+            （状态 fail、封禁槽位列写明原因），保证封禁信息不因逐槽位拆分而丢失。
         """
         rows = [['UID_Index', 'Name', 'VIP', '状态', '涉及存档数', '封禁槽位',
                  '时装', '载具', '特殊零件', '资产价值', '资产异常摘要', '异常摘要']]
+
+        def _clean(text, limit=400):
+            text = (text or '').replace('\n', ' ').replace('\r', ' ').replace(',', '，')
+            return text[:limit] + "..." if len(text) > limit else text
+
         for row in uid_rows:
-            detail = (row.get('reason') or '').replace('\n', ' ').replace('\r', ' ').replace(',', '，')
-            if len(detail) > 400:
-                detail = detail[:400] + "..."
+            uid = row.get('uid')
             items = row.get('items') or []
-            # 封禁列：本次检测到的封禁存档 + 未参与检测的封禁槽位（服务器未返回内容）
-            ban_tags = {it['ban_tag'] for it in items if it.get('ban_tag')}
-            ban_tags.update(row.get('inactive_bans') or [])
-            asset = row.get('asset') or {}
-            asset_detail = (asset.get('reason') or '').replace('\n', ' ').replace('\r', ' ') \
-                .replace(',', '，')
-            if len(asset_detail) > 400:
-                asset_detail = asset_detail[:400] + "..."
-            rows.append([
-                row.get('index_display') or '无',
-                row.get('name') or '无',
-                ReportRenderer._vip_text(row.get('vip_level')),
-                row.get('status') or 'warn',
-                len(items),
-                "；".join(sorted(ban_tags)) or '无',
-                asset.get('fashion_text') or '无',
-                asset.get('vehicle_text') or '无',
-                asset.get('parts_text') or '无',
-                asset.get('value') if asset.get('value') is not None else '无',
-                asset_detail or '无',
-                detail,
-            ])
+            total_slots = len(items)
+            vip_text = ReportRenderer._vip_text(row.get('vip_level'))
+
+            # ---- 逐存档行（一个 index 一行）----
+            for it in items:
+                slot_reason = []
+                if it.get('index_mismatch'):
+                    slot_reason.append(f"🔢 index异常：{it.get('index_tag')}")
+                if it.get('reason'):
+                    slot_reason.append(it['reason'])
+                asset = it.get('asset') or {}
+                rows.append([
+                    ReportRenderer._uid_index_name(it.get('theory'), it.get('name')) or '无',
+                    it.get('name') or '无',
+                    vip_text,
+                    it.get('status') or 'warn',
+                    total_slots,
+                    it.get('ban_tag') or '无',
+                    asset.get('fashion_text') or '无',
+                    asset.get('vehicle_text') or '无',
+                    asset.get('parts_text') or '无',
+                    asset.get('value') if asset.get('value') is not None else '无',
+                    _clean(asset.get('reason')) or '无',
+                    _clean("；".join(slot_reason)) or '无',
+                ])
+
+            # ---- 未参与检测的封禁槽位：单独成行（否则改逐槽位后会丢失该信息）----
+            inactive = SLOT_BAN_CACHE.get_inactive_bans(uid, [it.get('fname') for it in items])
+            for text in inactive:
+                m_slot = re.match(r"^存档(\d+)", text)
+                slot_no = m_slot.group(1) if m_slot else ''
+                rows.append([
+                    f"{uid}_{slot_no}" if slot_no else str(uid),
+                    '无',
+                    vip_text,
+                    'fail',
+                    total_slots,
+                    text,
+                    '无', '无', '无', '无', '无',
+                    f"🚨 封禁（服务器未返回内容，未参与检测）：{text}",
+                ])
         return rows
 
 
@@ -1632,20 +2068,162 @@ SLOT_BAN_CACHE = SlotBanCache()
 
 
 # ========================================================
-# 💰 物品价值对照表（good_items.csv）
+# 💰 物品价值对照表（good_items.csv / 旧版 *.bin）
 # ========================================================
+# 价格表路径 = <INPUT_DIR>/good_items.csv（最新版本，明文）。
+# 同目录的 *.bin 是**过往版本**（create/DATE_CREATE.py 产物，AES 加密），
+# 仍可读取：按扩展名自动识别，解密后同样还原为“行列表”。
+#
+# 行格式（两种来源统一成同一形状）：
+#     [记录ID(propId), 金额(price), 物品（cNname）, 英文名(name), 分类, ...]
+# 注：旧 bin 内没有英文名列，补空位占位；CSV 的 ID 复用单元格
+#     （如 4327 → 「960/1500」「噬原时装/噬魂时装」「phage/phageNew」）
+#     由 GoodsTable.split_variants 拆开登记。
+_price_rows_cache = {}      # {(路径, mtime, size): rows}
+
+
+def _decode_bin_price_rows(bin_path):
+    """解密 *.bin 过往版本价格表 → 行列表；失败返回 None。
+
+    依次尝试两套密钥（与 create/DATE_CREATE.py 的“CSV加密 / 高级数据加密”对应）：
+      • ITEM_SECRET_KEY/ITEM_SIGN_KEY → 内容为 记录ID,金额,物品,分类,备注
+      • SECRET_KEY/SIGN_KEY          → 内容为 记录ID,金额（最小形态）
+    """
+    if AES is None:
+        return None
+    try:
+        with open(bin_path, 'rb') as f:
+            file_data = f.read()
+    except OSError:
+        return None
+    if len(file_data) < 48:
+        return None
+    iv, signature, ciphertext = file_data[:16], file_data[-32:], file_data[16:-32]
+    body = iv + ciphertext
+    for secret, sign in ((ITEM_SECRET_KEY, ITEM_SIGN_KEY),
+                         (SECRET_KEY, SIGN_KEY)):
+        if not hmac.compare_digest(signature,
+                                   hmac.new(sign, body, hashlib.sha256).digest()):
+            continue        # 签名不对：换另一套密钥
+        try:
+            plain = unpad(AES.new(secret, AES.MODE_CBC, iv).decrypt(ciphertext),
+                          AES.block_size)
+        except ValueError:
+            continue
+        content, _ = DetectionEngine._decode_decrypted_data(plain)
+        if content is None:
+            continue
+        rows = list(csv.reader(io.StringIO(content)))
+        out = []
+        for row in rows:
+            if len(row) < 2:
+                continue
+            if not (row[0] or '').strip().isdigit():
+                continue        # 表头/空行
+            pid = (row[0] or '').strip()
+            price = (row[1] or '').strip()
+            cn = (row[2] or '').strip() if len(row) > 2 else ''
+            cat = (row[3] or '').strip() if len(row) > 3 else ''
+            # 旧版无英文名列 → 占位，后续按中文名查表
+            out.append([pid, price, cn, '', cat, ''])
+        return out or None
+    return None
+
+
+def read_price_rows(path):
+    """读取价格表为行列表（*.csv 明文 / *.bin 过往版本），带缓存；失败返回 None。"""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    key = (os.path.abspath(path), stat.st_mtime_ns, stat.st_size)
+    if key in _price_rows_cache:
+        return _price_rows_cache[key]
+
+    rows = None
+    if path.lower().endswith('.bin'):
+        rows = _decode_bin_price_rows(path)
+    else:
+        raw = None
+        for enc in ('gbk', 'utf-8-sig', 'utf-8'):
+            try:
+                with open(path, 'rb') as f:
+                    raw = f.read().decode(enc)
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+            except OSError:
+                return None
+        if raw is not None:
+            try:
+                rows = list(csv.reader(io.StringIO(raw)))
+            except Exception:
+                rows = None
+    if rows is None:
+        return None
+    if len(_price_rows_cache) > 8:      # 防止切换路径时无限堆积
+        _price_rows_cache.clear()
+    _price_rows_cache[key] = rows
+    return rows
+
+
+def load_price_map(path):
+    """价格表 → {propId: {'price': 金额, 'cname': 物品名}}；失败返回 None。
+
+    供「金币消费检测」使用（记录只有 propId）。
+    ID 复用（同一 propId 多个变体）时取**最高价**，避免低估消费。
+    """
+    rows = read_price_rows(path)
+    if rows is None:
+        return None
+    out = {}
+    for row in rows:
+        if len(row) < 3:
+            continue
+        pid_text = (row[0] or '').strip().lstrip('\ufeff')
+        if not pid_text.isdigit():
+            continue
+        cn, en, cat = (row[2] or '').strip(), (row[3] or '').strip(), (row[4] or '').strip()
+        best = out.get(int(pid_text))
+        for price_text, v_cn, v_en in GoodsTable.split_variants(row[1], cn, en):
+            try:
+                price = int(float(price_text))
+            except (TypeError, ValueError):
+                continue
+            name = v_cn or v_en or f"物品ID:{pid_text}"
+            if best is None or price > best['price']:
+                best = {'price': price, 'cname': name}
+        if best is not None:
+            if cat and not best.get('cat'):
+                best['cat'] = cat
+            out[int(pid_text)] = best
+    return out or None
+
+
 class GoodsTable:
     """id/价值对照表（inputdata/good_items.csv，GBK 编码）。
 
     表头：记录ID(propId),金额(price),物品（cNname）,英文名(name),分类,,备注
     同一物品可能随版本多次上架（价格不同），此处按“最高价”归并，
     避免用早期折扣价低估资产。
+
+    ★ ID 复用：同一 propId 在不同版本指向不同物品（如 4327 在 v28.7 是
+      噬原时装 960，之后被噬魂时装 1500 复用）时，单元格会写成
+      「960/1500」「噬原时装/噬魂时装」「phage/phageNew」—— 按位置拆开后
+      逐个名称登记（取最高价作单价，其余作为备选价），两个名字都能查到价。
     """
 
     def __init__(self):
         self.by_id = {}       # propId(int) -> {'price', 'cn', 'en', 'cat'}
-        self.by_en = {}       # 英文名 -> 同结构
+        self.by_en = {}       # 英文名 -> 同结构（auto 注册 _数字 去尾形式）
         self.by_cn = {}       # 中文名 -> 同结构
+        # ★ 时装升级道具：{propId: {'from_cn', 'to_cn', 'price'}}
+        #   名称列为「A时装>B时装」；英文名列为空（属道具，非时装）
+        self.upgrades = {}
+        # {目标时装英文名/中文名} → 该目标对应的升级道具 propId 列表
+        self.upgrade_to_keys = defaultdict(list)
         self.loaded = False
         self.error = ''
 
@@ -1656,65 +2234,136 @@ class GoodsTable:
             return ''
         return re.sub(r"_\d+$", "", name.strip())
 
+    @staticmethod
+    def split_variants(price_text, cn, en):
+        """拆分 ID 复用的多值单元格，返回 [(price_text, cn, en), ...]。
+
+        「960/1500」「噬原时装/噬魂时装」「phage/phageNew」按位置一一对应；
+        某一列不是多值时（如只有一个英文名），则全部沿用该值。
+        非多值行直接返回单项，行为与旧版一致。
+        """
+        def bits(v):
+            return [x.strip() for x in str(v or '').split('/')]
+
+        ps, cns, ens = bits(price_text), bits(cn), bits(en)
+        count = max(len(ps), len(cns), len(ens))
+        if count <= 1:
+            return [(str(price_text or '').strip(), cn, en)]
+
+        def pick(seq):
+            return seq[0] if len(seq) == 1 else (seq[i] if i < len(seq) else '')
+
+        out = []
+        for i in range(count):
+            out.append((pick(ps), pick(cns), pick(ens)))
+        return out
+
     def _add(self, bucket, key, info):
         if not key:
             return
         prev = bucket.get(key)
-        if prev is None or info['price'] > prev['price']:
+        if prev is None:
+            bucket[key] = info
+            return
+        # ★ ID 复用行的变体单价是**权威值**（如 4327 的「噬原时装 960 / 噬魂时装 1500」）：
+        #   后续版本可能再上架同名同英文名的条目（如 4575 噬原时装 1500），
+        #   若按“取最高价”会把复用行的原价抬掉，故复用值优先、不被覆盖。
+        if info.get('reuse_price'):
+            bucket[key] = info
+            return
+        if prev.get('reuse_price'):
+            return
+        if info['price'] > prev['price']:
             bucket[key] = info
 
     def load(self, csv_path):
+        """载入对照表（*.csv 最新版 / *.bin 过往版本，自动识别）。"""
         self.by_id.clear()
         self.by_en.clear()
         self.by_cn.clear()
+        self.upgrades.clear()
+        self.upgrade_to_keys.clear()
         self.loaded = False
         self.error = ''
         if not csv_path or not os.path.exists(csv_path):
             self.error = f"未找到价值对照表：{csv_path}"
             return None
-        raw = None
-        for enc in ('gbk', 'utf-8-sig', 'utf-8'):
-            try:
-                with open(csv_path, 'rb') as f:
-                    raw = f.read().decode(enc)
-                break
-            except (UnicodeDecodeError, LookupError):
-                continue
-            except OSError as e:
-                self.error = f"读取价值对照表失败：{e}"
-                return None
-        if raw is None:
-            self.error = "价值对照表编码无法识别（期望 GBK/UTF-8）"
-            return None
-        try:
-            rows = list(csv.reader(io.StringIO(raw)))
-        except Exception as e:
-            self.error = f"解析价值对照表失败：{e}"
+        rows = read_price_rows(csv_path)
+        if rows is None:
+            if csv_path.lower().endswith('.bin') and AES is None:
+                self.error = MISSING_CRYPTO_MSG
+            else:
+                self.error = f"价值对照表读取/解密失败：{csv_path}"
             return None
         for row in rows[1:]:
             if len(row) < 5:
                 continue
-            pid_text = (row[0] or '').strip()
-            try:
-                price = int(float((row[1] or '0').strip()))
-            except ValueError:
-                continue
+            pid_text = (row[0] or '').strip().lstrip('\ufeff')
             cn = (row[2] or '').strip()
             en = (row[3] or '').strip()
             cat = (row[4] or '').strip()
-            info = {'price': price, 'cn': cn, 'en': en, 'cat': cat}
+            # ★ 时装升级（特殊情况：一次升级 = 两笔购买记录）：单独收集，
+            #   不作为普通时装登记（否则会多出一个“未定价时装”并干扰差值判定）
+            if cat == FASHION_UPGRADE_CATEGORY:
+                from_cn, to_cn = parse_fashion_upgrade(cn)
+                if from_cn and to_cn and pid_text.isdigit():
+                    try:
+                        up_price = int(float((row[1] or '').strip()))
+                    except (TypeError, ValueError):
+                        up_price = None
+                    self.upgrades[int(pid_text)] = {'from_cn': from_cn,
+                                                    'to_cn': to_cn,
+                                                    'price': up_price}
+                continue
+            variants = []
+            for price_text, v_cn, v_en in self.split_variants(row[1], cn, en):
+                try:
+                    price = int(float(price_text))
+                except (TypeError, ValueError):
+                    continue        # 无价行（如只有 ID/名称）跳过
+                variants.append({'price': price, 'cn': v_cn or cn,
+                                 'en': v_en or en, 'cat': cat})
+            if not variants:
+                continue
+            variants.sort(key=lambda v: -v['price'])
+            reused = len(variants) > 1
+            if reused:
+                # ID 复用：记录全部变体（供付费对照“任一名称都算有来源”与人工复核），
+                # 并锁定各自原价（不被后续同名条目按“最高价”覆盖）
+                for v in variants:
+                    v['reused'] = True
+                    v['reuse_price'] = True
+                for v in variants:
+                    v['variants'] = variants
+            for v in variants:
+                self._add(self.by_en, v['en'], v)
+                base = self._norm_name(v['en'])
+                if base and base != v['en']:
+                    self._add(self.by_en, base, v)
+                if v['cn'] and v['cn'] != '0':
+                    self._add(self.by_cn, v['cn'], v)
             if pid_text.isdigit():
-                self._add(self.by_id, int(pid_text), info)
-            self._add(self.by_en, en, info)
-            base = self._norm_name(en)
-            if base and base != en:
-                self._add(self.by_en, base, info)
-            if cn and cn != '0':
-                self._add(self.by_cn, cn, info)
+                self._add(self.by_id, int(pid_text), variants[0])   # 最高价那条
         self.loaded = bool(self.by_en or self.by_cn)
         if not self.loaded:
             self.error = "价值对照表为空或格式不符"
+        # 升级目标 → 可用名称键（英文名优先，供付费记录归属）
+        for pid, up in self.upgrades.items():
+            info = self.by_cn.get(up['to_cn'])
+            keys = []
+            if info and info.get('en'):
+                keys.append(info['en'])
+            keys.append(up['to_cn'])
+            self.upgrade_to_keys[up['to_cn']] = keys
+            up['to_keys'] = keys
+            # 基础时装在升级后被消耗 → 缺口核查需扣除
+            base_info = self.by_cn.get(up['from_cn'])
+            up['from_keys'] = [k for k in ((base_info or {}).get('en'), up['from_cn']) if k]
         return self.by_en if self.loaded else None
+
+    def upgrade_name_keys(self, to_cn):
+        """目标时装的可匹配名称键（英文名 / 中文名）；非升级目标返回 []。"""
+        return list(self.upgrade_to_keys.get((to_cn or '').strip()) or [])
 
     @staticmethod
     def is_chip(cn, en=''):
@@ -1728,17 +2377,38 @@ class GoodsTable:
 
     def price_of(self, name, cn='', cat_wanted=None):
         """按英文名/中文名查价；返回 (price, matched_by, cat) 或 None。"""
+        info = self.entry_of(name, cn)
+        if info is not None and (cat_wanted is None or info['cat'] in cat_wanted):
+            return info['price'], ('en' if self.by_en.get(name) is info else 'cn'), info['cat']
+        return None
+
+    def entry_of(self, name, cn=''):
+        """返回条目 dict（含 price/cn/en/cat，ID 复用时带 variants）；未收录返回 None。"""
         if name:
             info = self.by_en.get(name)
             if info is None:
                 info = self.by_en.get(self._norm_name(name))
-            if info is not None and (cat_wanted is None or info['cat'] in cat_wanted):
-                return info['price'], 'en', info['cat']
+            if info is not None:
+                return info
         if cn:
             info = self.by_cn.get(cn)
-            if info is not None and (cat_wanted is None or info['cat'] in cat_wanted):
-                return info['price'], 'cn', info['cat']
+            if info is not None:
+                return info
         return None
+
+    def variants_of(self, name, cn=''):
+        """ID 复用物品的全部名称变体 [{'price','cn','en',...}]；非复用返回 []。
+
+        用途：付费记录只记 propId（如 4327），而该 ID 在不同版本对应不同物品
+        （噬原时装 phage / 噬魂时装 phageNew）；比对时任一名称在档即视为来源成立。
+        """
+        for key, bucket in ((name, self.by_en), (cn, self.by_cn)):
+            if not key:
+                continue
+            info = bucket.get(key) or bucket.get(self._norm_name(key))
+            if info and info.get('variants'):
+                return list(info['variants'])
+        return []
 
 
 # 全局实例，整个程序共用
@@ -1798,7 +2468,11 @@ class AssetCollector:
         self.goods_buy = {}       # goods.buyNumObj: {标签: 购买次数}
         self.tower = {}           # tower.gO.saveObj: {层: 通关难度}
         self.tower_claimed = {}    # {baseLabel: 已领取的塔层奖励份数}
+        self.level_gift_claimed = set()   # 已领取的等级礼包键（如 dgcpu1，见 LEVEL_GIFT_PARTS）
         self.pay_totals = {}       # {kind: {名称: 付费次数}}（购买记录，供缺口反查）
+        self.pay_shared = set()    # {(kind, key)} ID 复用共享次数 → 缺口核查豁免
+        self.upgrade_base_used = defaultdict(int)   # {(kind, key): 份数} 被升级消耗
+        self.upgrade_targets = set()   # {(kind, key)} 升级目标（来源计入 pay_totals）
         # 判定阈值统一来自 inputdata/free_quota.ini 的免费额度，
         # 不再有“持有vs付费差值阈值”这类人工参数。
         # 差值价值达到该值才判为异常（0 = 只要有差值就报）；
@@ -1841,7 +2515,7 @@ class AssetCollector:
 
     @classmethod
     def _item_meta(cls, node):
-        return {
+        meta = {
             'name': cls._child_text(node, 'name'),
             'cn': cls._child_text(node, 'cnName'),
             'partType': cls._child_text(node, 'partType'),
@@ -1852,6 +2526,13 @@ class AssetCollector:
             'getTime': (cls._child_text(node, 'getTime')
                         or cls._child_text(node, 'severTime')),
         }
+        # ★ ID 复用修正：存档内的 cnName 是写入时快照，之后物品被复用会“名不符实”
+        #   （如 phage 被噬魂时装复用，仅 2022-09-22 那批才是噬原时装）。
+        fixed = id_reuse_fix(meta['name'], meta['getTime'])
+        if fixed:
+            meta['cn_original'] = meta['cn']
+            meta['cn'] = fixed
+        return meta
 
     @staticmethod
     def is_rare_parts(cn, level, en=''):
@@ -1881,13 +2562,19 @@ class AssetCollector:
 
     # ---- 采集 ----
     def _add(self, kind, key, name, cn, count, source, level=0, is_chip=False, cat='',
-             get_time='', tag=''):
+             get_time='', tag='', en_effective=''):
+        """登记一条物品（同 key 累加）。
+
+        en_effective: 真实英文名（ID 复用修正后可能与 name 不同）—— 计价与
+                      付费对照要用它而非存档里的旧名。
+        """
         bucket = self.items[kind][source]
         rec = bucket.get(key)
         if rec is None:
             bucket[key] = {'name': name, 'cn': cn, 'count': count, 'level': level,
                            'source': source, 'is_chip': is_chip, 'cat': cat, 'price': None,
-                           'get_time': get_time, 'tag': tag}
+                           'get_time': get_time, 'tag': tag,
+                           'en_effective': en_effective or name}
             return
         rec['count'] += count
         # 获取时间保留最早的一条（同一物品可能来自多个存档/槽位）
@@ -1895,6 +2582,8 @@ class AssetCollector:
             rec['get_time'] = get_time
         if tag and not rec.get('tag'):
             rec['tag'] = tag
+        if en_effective and not rec.get('en_effective'):
+            rec['en_effective'] = en_effective
         # 保留等级最高的一条作为展示/判定依据
         if level > rec.get('level', 0):
             rec['level'] = level
@@ -1906,11 +2595,20 @@ class AssetCollector:
             meta = self._item_meta(it)
             pt = meta['partType']
             if pt == ASSET_FASHION:
-                kind, key = ASSET_FASHION, meta['name'] or meta['cn']
+                kind = ASSET_FASHION
             elif pt == ASSET_VEHICLE:
-                kind, key = ASSET_VEHICLE, meta['name'] or meta['cn']
+                kind = ASSET_VEHICLE
             else:
                 continue
+            # ★ ID 复用修正后，该条目的真实身份变了（如 phage → 噬魂时装）：
+            #   价格与付费对照必须换成修正后的英文名，否则会按旧名取到旧的价
+            #   （噬原 960 / 噬魂 1500）。真名未变时 name_effective 就是原名。
+            en_eff = meta['name']
+            if meta.get('cn_original'):
+                info = self.table.by_cn.get(meta['cn'])
+                if info and info.get('en'):
+                    en_eff = info['en']
+            key = en_eff or meta['name'] or meta['cn']
             if not key:
                 continue
             tag = ''
@@ -1919,7 +2617,7 @@ class AssetCollector:
             self._add(kind, key, meta['name'], meta['cn'], meta['count'], source,
                       level=meta['level'],
                       is_chip=self.table.is_chip(meta['cn'], meta['name']),
-                      get_time=meta['getTime'], tag=tag)
+                      get_time=meta['getTime'], tag=tag, en_effective=en_eff)
 
     def collect_parts_container(self, container, source):
         """采集零件（零件背包 / 武器镶嵌位）。
@@ -1997,6 +2695,23 @@ class AssetCollector:
                 out[name] = num
         return out
 
+    def _load_level_gift(self, save_node):
+        """读取 gift.levelGiftObj 中**已领取**的礼包键，返 {键}（如 {'dgcpu1'}）。
+
+        仅记 ==true 的项（存档里出现即已领，取值恒为 true）。
+        与虚天塔同理：等级礼包奖励**一次性**（每档只能领一次）。
+        稀有零件奖励映射见 LEVEL_GIFT_PARTS（权威：368_XMLOut_levelGiftClass.bin）。
+        """
+        out = set()
+        node = save_node.find('s[@name="gift"]/s[@name="levelGiftObj"]')
+        if node is None:
+            return out
+        for c in node:
+            name = c.get('name')
+            if name and (c.text or '').strip().lower() == 'true':
+                out.add(name)
+        return out
+
     def _load_tower(self, save_node):
         """读取 tower.gO.saveObj：{层号: 该层已通关的最高难度(0~4)}。
 
@@ -2029,30 +2744,68 @@ class AssetCollector:
                 claimed[base] += 1
         return claimed
 
+    @staticmethod
+    def _pay_kind_of(cat):
+        """分类 → 资产类别（载具 / 时装 / 零件）；不参与对照返回 None。"""
+        cat = cat or ''
+        if cat in ('载具', '载具碎片'):
+            return ASSET_VEHICLE
+        if cat.startswith('时装'):
+            return ASSET_FASHION
+        if cat in ('零件', '部件'):
+            return ASSET_PARTS
+        return None
+
     def _pay_totals(self, bought):
-        """把 pay 的 propId 归并成 {kind: {key: 数量}}。"""
+        """把 pay 的 propId 归并成 {kind: {key: 数量}}。
+
+        ★ 时装升级（特殊情况：一次升级 = 两笔购买记录）：
+          先买基础时装 A，再买「A时装>B时装」升级道具 → A 被消耗、得到 B。
+          pay.obj 里两条记录（A + 升级道具），而存档内只会看到 B。
+          因此：升级道具的次数记到**目标时装 B** 名下（让 B 有来源），
+          同时把 B 计入 self.upgrade_consumed（B 的来源份数不再另计）。
+          （基础时装 A 的购买记录仍按其 propId 正常登记，无需特殊处理。）
+        ★ ID 复用（如 4327 在不同版本分别对应 噬原时装(phage) 与 噬魂时装(phageNew)）：
+          pay.obj 只记 propId，无法区分到底买的是哪个 —— 因此把该次数
+          登记到**每个变体名下**（任一名下都算“有来源”），同时记入 self.pay_shared，
+          供反向缺口核查时豁免（归属不确定，不能据此断言“买了却没在档”）。
+        """
         totals = {ASSET_FASHION: defaultdict(int),
-                  ASSET_VEHICLE: defaultdict(int),
-                  ASSET_PARTS: defaultdict(int)}
-        cats = (ASSET_FASHION, ASSET_VEHICLE, ASSET_PARTS)
+                  ASSET_VEHICLE: defaultdict(int)}
+        totals[ASSET_PARTS] = defaultdict(int)
         for pid, cnt in bought.items():
+            # ★ 时装升级道具：归到目标时装名下，并记下被消耗的基础时装
+            up = self.table.upgrades.get(pid)
+            if up:
+                for key in (up.get('to_keys') or []):
+                    if cnt > totals[ASSET_FASHION][key]:
+                        totals[ASSET_FASHION][key] = cnt
+                    self.upgrade_targets.add((ASSET_FASHION, key))
+                for key in (up.get('from_keys') or []):
+                    self.upgrade_base_used[(ASSET_FASHION, key)] += cnt
+                continue
             info = self.table.by_id.get(pid)
             if not info:
                 continue
-            cat = info['cat'] or ''
-            kind = None
-            if cat == '载具' or cat == '载具碎片':
-                kind = ASSET_VEHICLE
-            elif cat.startswith('时装'):
-                kind = ASSET_FASHION
-            elif cat == '零件':
-                kind = ASSET_PARTS
+            kind = self._pay_kind_of(info['cat'])
             if kind is None:
                 continue
-            key = info['en'] or info['cn']
-            if self.table.is_chip(info['cn'], info['en']):
-                continue    # 碎片/材料不参与对照
-            totals[kind][key] += cnt
+            shared = bool(info.get('variants'))
+            for variant in (info.get('variants') or [info]):
+                key = variant.get('en') or variant.get('cn')
+                if not key:
+                    continue
+                if self.table.is_chip(variant.get('cn'), variant.get('en')):
+                    continue    # 碎片/材料不参与对照
+                if kind == ASSET_PARTS:
+                    # ★ 零件两侧标识形态不一致（pay 侧 "burstParts_1"，
+                    #   存档侧 "burstParts_2"）→ 统一归一到 baseLabel，
+                    #   否则付费次数永远匹配不上（稀有零件付费统计丢失）。
+                    key = parts_base_label(key)
+                if cnt > totals[kind][key]:   # 复用变体共享同一次数，取最大而非累加
+                    totals[kind][key] = cnt
+                if shared:
+                    self.pay_shared.add((kind, key))
         return totals
 
     def collect(self, file_path):
@@ -2092,6 +2845,7 @@ class AssetCollector:
         self.goods_buy = self._load_goods_buy(save_node)
         self.tower = self._load_tower(save_node)
         self.tower_claimed = self._tower_parts_claimed(self.tower)
+        self.level_gift_claimed = self._load_level_gift(save_node)
         cats_wanted = {'时装', '时装(下架)', '时装(升级)', '载具', '零件'}
 
         for kind in (ASSET_FASHION, ASSET_VEHICLE, ASSET_PARTS):
@@ -2125,8 +2879,13 @@ class AssetCollector:
                         # 且图鉴内载具本身可免费获得 → 整体豁免差值判定，避免误报
                         rec['no_excess'] = True
                     price = None
+                    # 计价/对照使用“真实英文名”（ID 复用被修正时会与存档旧名不同，
+                    # 如存档写 phage 但实际是噬魂时装 → 应用 phageNew 查价 1500）
+                    en_eff = rec.get('en_effective') or rec['name']
                     if not rec['is_chip']:
-                        got = self.table.price_of(rec['name'], rec['cn'], cats_wanted)
+                        got = self.table.price_of(en_eff, rec['cn'], cats_wanted)
+                        if got is None and en_eff != rec['name']:
+                            got = self.table.price_of(rec['name'], rec['cn'], cats_wanted)
                         if got:
                             price = got[0]
                             if not rec['cat']:
@@ -2156,8 +2915,20 @@ class AssetCollector:
                     # 购买记录对照：未购买过（对照表有价但 pay 无记录）的物品，
                     # 会在判定阶段按「持有量 > 应有总量（差值）」处理。
                     pay_cnt = pay_totals[kind].get(key)
-                    if pay_cnt is None and rec['name']:
-                        pay_cnt = pay_totals[kind].get(self.table._norm_name(rec['name']))
+                    if pay_cnt is None and kind == ASSET_PARTS:
+                        # 零件：存档 key 带等级后缀（shockParts_2），pay 侧为 baseLabel
+                        pay_cnt = pay_totals[kind].get(parts_base_label(key))
+                    if pay_cnt is None:
+                        for token in (en_eff, rec['name']):
+                            if not token:
+                                continue
+                            pay_cnt = pay_totals[kind].get(token)
+                            if pay_cnt is None:
+                                pay_cnt = pay_totals[kind].get(self.table._norm_name(token))
+                            if pay_cnt is None and kind == ASSET_PARTS:
+                                pay_cnt = pay_totals[kind].get(parts_base_label(token))
+                            if pay_cnt is not None:
+                                break
                     # 载具进阶体：购买记录通常落在基础形态（如 神圣盖亚 → 泰坦），
                     # 按家族归一后仍视为已购买，避免正常匹配的被误报。
                     if pay_cnt is None and kind == ASSET_VEHICLE:
@@ -2267,8 +3038,11 @@ class AssetCollector:
             等价于：把高级零件"拆解"回低级材料后，看总共需要多少低级零件。
 
         应有总量 = 付费次数(pay) + 券购次数(goods._p) + 已领塔奖励(tower)
+                   + 已领等级礼包(levelGiftObj)
                    + 活动修正（free_quota.ini 的 [parts_adjust]：活动/兑换/赠送等
                      存档内查不到记录的来源，按零件人工登记 —— 即“活动”的修正参数）
+        特例：三种「芯」按 PARTS_VERSION_LIMIT 的**版本上限**直接封顶
+              （紫金之芯另有合成渠道，上限 2 > 礼包 1，详见该表注释）。
 
         判定：`实际一阶当量 > 应有总量` → 差值异常（疑似异常改档）。
         不再报「实际 < 应有」（元素球等被当作合成材料消耗是正常现象）。
@@ -2291,14 +3065,20 @@ class AssetCollector:
                 or max(recs, key=lambda r: r['count'])
             # 付费次数按 baseLabel 记录，全族只计一次（取最大，避免各阶重复累加）
             paid_part = max((r.get('pay') or 0) for r in recs)
-            # 零件券商店实际购买次数（buyNumObj 键为 "<baseLabel>_1_p"）
-            ticket_part = self.goods_buy.get(f"{base}_1_p", 0)
-            if not ticket_part:
-                ticket_part = sum(v for k, v in self.goods_buy.items()
-                                  if k.endswith('_p')
-                                  and self.table._norm_name(k[:-2]) == base)
+            # 零件券商店实际购买次数（buyNumObj 键为 "<baseLabel>_1_p"；
+            # 按 baseLabel 归一汇总，见 buy_num_of）
+            ticket_part = buy_num_of(self.goods_buy, base)
             # 虚天塔已领取的该零件奖励（一次性，不随周重置）
             tower_part = (self.tower_claimed or {}).get(base, 0)
+            # ★ 等级礼包（一次性）：该族是否由某个已领取的礼包发放（见 LEVEL_GIFT_PARTS）。
+            #   礼包是按档位整包领取的，故族内只取「已领礼包该给的份数」之和。
+            gift_part = sum(num for key, mapping in LEVEL_GIFT_PARTS.items()
+                            if key in (self.level_gift_claimed or set())
+                            for b, num in mapping.items() if b == base)
+            # ★ 版本上限（三种「芯」）：上限 > 礼包份数的部分来自其它渠道
+            #   （如紫金之芯可由物品合成再得 1 份），但总数封顶 —— 直接按上限判定，
+            #   即使存档缺 levelGiftObj（人工导入档）也稳。
+            limit_part = PARTS_VERSION_LIMIT.get(base)
             # ★ 活动修正（free_quota.ini 的 [parts_adjust]）：活动/兑换/赠送等
             #   存档内查不到记录的来源，无法自动统计，只能按零件人工登记。
             adjust_part = free_quota_entry(ASSET_PARTS_ADJUST,
@@ -2309,6 +3089,8 @@ class AssetCollector:
                 r['quota'] = adjust_part
                 r['ticket_buy'] = ticket_part
                 r['tower_claimed'] = tower_part
+                r['gift_claimed'] = gift_part
+                r['version_limit'] = limit_part
                 r['adjust'] = adjust_part
                 r['pay'] = paid_part or None
 
@@ -2329,8 +3111,13 @@ class AssetCollector:
             if price is None:
                 price = rep.get('price')
 
-            # 应有总量 = 付费 + 券购 + 塔领（存档实际记录） + 活动修正（人工登记）
-            should_have = paid_part + ticket_part + tower_part + adjust_part
+            # 应有总量 = 付费 + 券购 + 塔领 + 已领礼包（存档实际记录） + 活动修正（人工登记）
+            # 若该族登记了版本上限（三种「芯」），则以上限为准 —— 上限已涵盖
+            # 所有合法渠道（礼包/合成等），不会因漏登记渠道而误报。
+            if limit_part is not None:
+                should_have = limit_part
+            else:
+                should_have = paid_part + ticket_part + tower_part + gift_part + adjust_part
             rep['explainable'] = should_have
             for r in recs:
                 r['explainable'] = should_have
@@ -2362,24 +3149,73 @@ class AssetCollector:
         与「未购买但存档内拥有」（持有量 > 购买记录）互为反向：
             • 存档内持有但数量不足（持有量 < 购买记录）→ missing = 购买 − 持有
             • 存档内完全未见（购买记录存在但无对应物品）→ absent = True
+
+        ★ ID 复用豁免：若该物品的付费记录来自共用 propId（如 4327 同时对应
+          噬原/噬魂时装），则无法判断“买的到底是哪一个” —— 不再据此报缺口。
+        ★ 时装升级豁免：升级会**消耗**基础时装（A + 升级道具 → B），
+          故基础时装的“买了却不在档”是正常现象，需先扣除被消耗的份数。
+        ★ 载具家族聚合（★ 关键）：购买记录只按**基础形态的 propId** 登记
+          （如幽鬼 BlueMoto=2），而存档内各式进化体是**独立条目**
+          （血魂×1 + 飞魄×1）。若不先按家族汇总就逐条比对，同一份家族
+          购买记录会被各式分别消费一次 → 凭空报出重复缺口
+          （实测：1210861107 误报「飞魄缺1份、血魂缺1份」，
+           而实际幽鬼族 2 次购买 = 血魂 1 + 飞魄 1，完全对得上）。
         返回 [rec]（kind / name / cn / pay / count / missing / missing_value / price），
         供报告与 CSV 的「🔻 购买了但存档内无」区块使用。
         """
         out = []
 
         # 1) 存档内持有、但少于购买记录（持有 < 购买）
-        for kind in (ASSET_FASHION, ASSET_VEHICLE):
-            for rec in (summary.get(kind) or {}).get('items', {}).values():
-                if kind == ASSET_VEHICLE and rec.get('tag') != 'paid':
-                    continue            # 只比对付费载具
-                pay_cnt = rec.get('pay') or 0
-                if pay_cnt > rec['count']:
-                    item = dict(rec)
-                    item['kind'] = kind
-                    item['missing'] = pay_cnt - rec['count']
-                    item['missing_value'] = (rec.get('price') or 0) * item['missing']
-                    item['absent'] = False
-                    out.append(item)
+        #    载具先按家族聚合（购买记录落在基础形态，进阶体各自独立成条），
+        #    否则同一份家族购买记录会被各式重复消费 → 重复报缺口。
+        vehicle_families = {}
+        for rec in (summary.get(ASSET_VEHICLE) or {}).get('items', {}).values():
+            if rec.get('tag') != 'paid':
+                continue                    # 只比对付费载具
+            fam_cn, fam_en = vehicle_family_of(rec.get('cn'), rec.get('name'))
+            fam_key = fam_cn or fam_en or rec.get('name') or rec.get('cn')
+            bucket = vehicle_families.setdefault(
+                fam_key, {'recs': [], 'count': 0, 'pay': 0})
+            bucket['recs'].append(rec)
+            bucket['count'] += rec['count']
+            bucket['pay'] = max(bucket['pay'], rec.get('pay') or 0)
+
+        for fam_key, bucket in vehicle_families.items():
+            # 全族份数与购买记录比较；ID 复用豁免按任一变体命中即跳过
+            if any((ASSET_VEHICLE, r.get('name')) in self.pay_shared
+                   for r in bucket['recs']):
+                continue
+            pay_cnt = bucket['pay']
+            if pay_cnt > bucket['count']:
+                # 代表记录：取家族内持有量最大的一条展示（差额记在全族上）
+                rep = max(bucket['recs'], key=lambda r: r['count'])
+                item = dict(rep)
+                item['kind'] = ASSET_VEHICLE
+                item['cn'] = fam_key + '系列'
+                item['missing'] = pay_cnt - bucket['count']
+                item['held_family'] = bucket['count']
+                # 各形态明细（如「血魂×1、飞魄×1」），便于人工核对
+                item['family_detail'] = "、".join(
+                    f"{r.get('cn') or r.get('name')}×{r['count']}"
+                    for r in sorted(bucket['recs'],
+                                    key=lambda r: (-r['count'], r.get('cn') or '')))
+                item['missing_value'] = (rep.get('price') or 0) * item['missing']
+                item['absent'] = False
+                out.append(item)
+
+        for rec in (summary.get(ASSET_FASHION) or {}).get('items', {}).values():
+            if (ASSET_FASHION, rec.get('name')) in self.pay_shared:
+                continue                    # ID 复用：归属不确定，豁免
+            pay_cnt = rec.get('pay') or 0
+            # 被升级消耗的份数（如 白狐心零时装 → 白狐时装）也算“已解释”
+            consumed = self.upgrade_base_used.get((ASSET_FASHION, rec.get('name')), 0)
+            if pay_cnt > rec['count'] + consumed:
+                item = dict(rec)
+                item['kind'] = ASSET_FASHION
+                item['missing'] = pay_cnt - rec['count'] - consumed
+                item['missing_value'] = (rec.get('price') or 0) * item['missing']
+                item['absent'] = False
+                out.append(item)
 
         # 2) 存档内完全未见（购买记录中的付费载具 / 付费时装）
         present = {ASSET_FASHION: set(), ASSET_VEHICLE: set()}
@@ -2400,6 +3236,16 @@ class AssetCollector:
             for name, cnt in (self.pay_totals.get(kind) or {}).items():
                 if not name or cnt <= 0:
                     continue
+                if (kind, name) in self.pay_shared:
+                    continue            # ID 复用：归属不确定，豁免
+                # 升级消耗：买了基础时装但被升级吃掉 → 扣掉后再算缺口
+                consumed = self.upgrade_base_used.get((kind, name), 0)
+                if not consumed:
+                    consumed = self.upgrade_base_used.get(
+                        (kind, self.table._norm_name(name)), 0)
+                if consumed >= cnt:
+                    continue
+                remain = cnt - consumed
                 if (name in present[kind]
                         or self.table._norm_name(name) in present[kind]):
                     continue
@@ -2418,10 +3264,12 @@ class AssetCollector:
                     if is_free_fashion(cn, en) or is_rare_fashion(cn, en, self.table):
                         continue        # 免费/稀有时装不参与比对
                 price = info.get('price')
+                missing_value = (price or 0) * remain
                 out.append({'kind': kind, 'name': en, 'cn': cn or en, 'count': 0,
                             'level': 0, 'price': price, 'pay': cnt,
-                            'explainable': cnt, 'missing': cnt,
-                            'missing_value': (price or 0) * cnt,
+                            'explainable': cnt, 'missing': remain,
+                            'consumed': consumed or None,
+                            'missing_value': missing_value,
                             'absent': True, 'is_chip': False, 'tag': '', 'base': ''})
 
         out.sort(key=lambda r: (-r.get('missing_value', 0), -r.get('missing', 0)))
@@ -2499,127 +3347,39 @@ class DetectionEngine:
         return None, None
 
     @staticmethod
-    def load_price_map_from_bin(bin_path, secret_key_bytes, sign_key_bytes):
-        price_map = {}
-        if AES is None:            # 缺少 pycryptodome：交由调用方给出明确提示
+    def load_price_map_from_bin(bin_path, secret_key_bytes=None, sign_key_bytes=None):
+        """兼容旧调用：价格表 → {propId: price}。
+
+        现统一由 load_price_map() 处理（*.csv 最新版 / *.bin 过往版本自动识别）；
+        保留本方法仅为向后兼容（密钥参数已内置在读取器里）。
+        记录只有 propId 时，同一 ID 的多个变体取最高价。
+        """
+        pm = load_price_map(bin_path)
+        if not pm:
             return None
-        if not os.path.exists(bin_path):
-            return None
-        try:
-            with open(bin_path, 'rb') as f:
-                file_data = f.read()
-            if len(file_data) < 48:
-                return None
-            iv = file_data[:16]
-            signature = file_data[-32:]
-            ciphertext = file_data[16:-32]
-            body_to_verify = iv + ciphertext
-            expected_signature = hmac.new(sign_key_bytes, body_to_verify, hashlib.sha256).digest()
-            if not hmac.compare_digest(signature, expected_signature):
-                return None
-            cipher = AES.new(secret_key_bytes, AES.MODE_CBC, iv)
-            try:
-                decrypted_padded = cipher.decrypt(ciphertext)
-                decrypted_data = unpad(decrypted_padded, AES.block_size)
-            except ValueError:
-                return None
-            csv_content, _ = DetectionEngine._decode_decrypted_data(decrypted_data)
-            if csv_content is None:
-                return None
-            lines = csv_content.splitlines()
-            for i, line in enumerate(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                if i == 0 and not line[0].isdigit():
-                    continue
-                parts = line.split(',')
-                if len(parts) >= 2:
-                    try:
-                        pid = int(parts[0])
-                        price = int(float(parts[1]))
-                        price_map[pid] = price
-                    except ValueError:
-                        continue
-            return price_map
-        except Exception:
-            return None
+        return {pid: v['price'] for pid, v in pm.items()}
 
     @staticmethod
     def load_price_map_from_bin_pro(bin_path):
-        if AES is None:            # 缺少 pycryptodome：交由调用方给出明确提示
-            return None
-        if not os.path.exists(bin_path):
-            return None
-        try:
-            with open(bin_path, 'rb') as f:
-                file_data = f.read()
-            if len(file_data) < 48:
-                return None
-            iv = file_data[:16]
-            signature = file_data[-32:]
-            ciphertext = file_data[16:-32]
-            body_to_verify = iv + ciphertext
-            expected_signature = hmac.new(ITEM_SIGN_KEY, body_to_verify, hashlib.sha256).digest()
-            if not hmac.compare_digest(signature, expected_signature):
-                return None
-            try:
-                cipher = AES.new(ITEM_SECRET_KEY, AES.MODE_CBC, iv)
-                decrypted_padded = cipher.decrypt(ciphertext)
-                decrypted_data = unpad(decrypted_padded, AES.block_size)
-            except ValueError:
-                return None
-            csv_content, _ = DetectionEngine._decode_decrypted_data(decrypted_data)
-            if csv_content is None:
-                return None
-            price_map = {}
-            lines = csv_content.splitlines()
-            for i, line in enumerate(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                if i == 0:
-                    try:
-                        int(line.split(',')[0])
-                    except ValueError:
-                        continue
-                parts = line.split(',')
-                if len(parts) >= 2:
-                    try:
-                        pid = int(parts[0])
-                        price = int(float(parts[1]))
-                        cname = None
-                        if len(parts) >= 3:
-                            cname = parts[2].strip()
-                            if not cname:
-                                cname = None
-                        price_map[pid] = {'price': price, 'cname': cname}
-                    except ValueError:
-                        continue
-            return price_map
-        except Exception:
-            return None
+        """兼容旧调用：价格表 → {propId: {'price', 'cname'}}。"""
+        return load_price_map(bin_path)
 
     @staticmethod
     def check_pay_xml(file_path, bin_path, max_details=10, min_money_details=500,
                       min_number_details=500, export_full=False):
         """金币消费检测：列出全部消费明细，并对单价/次数超阈值项预警。
-        返回 dict: {title,status,msg,total_cost}"""
-        price_map = None
-        try:
-            price_map = DetectionEngine.load_price_map_from_bin(bin_path, SECRET_KEY, SIGN_KEY)
-        except Exception:
-            price_map = None
-        if price_map is None:
-            try:
-                price_map = DetectionEngine.load_price_map_from_bin_pro(bin_path)
-            except Exception:
-                price_map = None
+
+        价格表默认 = 最新版 inputdata/good_items.csv；传入 *.bin 则按其过往版本
+        （自动解密）解析。同一 propId 多个变体（ID 复用）按最高价计。
+        返回 dict: {title,status,msg,total_cost}
+        """
+        price_map = load_price_map(bin_path)
 
         if price_map is None:
-            hint = MISSING_CRYPTO_MSG if AES is None else "文件不存在或格式错误"
+            hint = MISSING_CRYPTO_MSG if (AES is None and str(bin_path).lower().endswith('.bin')) \
+                else "文件不存在或格式错误"
             return {'title': '金币消费检测', 'status': 'fail',
-                    'msg': f"❌ 错误：无法读取或解密价格表文件。\n路径：{bin_path}\n({hint})",
+                    'msg': f"❌ 错误：无法读取价格表文件。\n路径：{bin_path}\n({hint})",
                     'total_cost': 0}
         if not price_map:
             return {'title': '金币消费检测', 'status': 'warn',
@@ -2803,8 +3563,82 @@ class DetectionEngine:
         return {'title': 'VIP金币消费', 'status': status, 'msg': '\n'.join(msg_lines)}
 
     @staticmethod
+    def _vip_snapshot_issue(root, vip_level, vip_node=None):
+        """VIP 二重检测：gift.vv（导入时快照）↔ vip.upLevelObj（当前值）。
+
+        游戏导入存档时把 upLevelObj 的首次快照写入 gift.vv，事后用
+        ObjectMethod.samePan 自校验（PlayerSave.getZuobiStr）——两者本应完全
+        一致；改档者通常只改其中一处，因此这是独立于 m 权限越界的第二重证据。
+
+        vip_node 为已定位的 vip 节点（与 m 权限检查同源，避免重复查找取错节点）。
+        返回 (state, text)：'skip'=无快照/无法判定、'ok'=一致、'fail'=不一致。
+        """
+        save_node = root
+        if save_node.get('name') != 'null':
+            inner = save_node.find('s[@name="null"]')
+            if inner is not None:
+                save_node = inner
+
+        # versionNumber 位于 main 子对象下（PlayerSave.main.versionNumber）
+        main_node = save_node.find('s[@name="main"]')
+        version_node = (main_node.find('s[@name="versionNumber"]')
+                        if main_node is not None else None)
+        try:
+            version = float((version_node.text or '').strip())
+        except (AttributeError, TypeError, ValueError):
+            version = 0.0
+        if version < VIP_VV_MIN_VERSION:
+            return 'skip', None              # 老版本没有该机制，不判定
+
+        gift_node = save_node.find('s[@name="gift"]')
+        vv_node = (gift_node.find('s[@name="vv"]')
+                   if gift_node is not None else None)
+        if vv_node is None:
+            return 'skip', None
+        raw = re.sub(r'\s+', '', vv_node.text or '')
+        if not raw:
+            return 'skip', None              # 从未写入过快照（如未导入过的档）
+        if raw == VIP_VV_NO_SNAPSHOT:
+            if vip_level and vip_level > 0:
+                return 'fail', (f"gift.vv 快照缺失（vv=no）却已有 VIP{vip_level}，"
+                                f"疑似异常修改存档")
+            return 'skip', None
+
+        snapshot = decode_amf3_object(raw)
+        if snapshot is None:
+            return 'skip', None              # 结构超出预期 → 不判定，避免误报
+        # 形状校验：快照应为 {mNNNN: bool}；不符则视为结构未识别，不判定
+        if not all(re.fullmatch(r'm\d+', key) and isinstance(val, bool)
+                   for key, val in snapshot.items()):
+            return 'skip', None
+
+        current = {}
+        up_node = (vip_node.find('s[@name="upLevelObj"]')
+                   if vip_node is not None else None)
+        if up_node is not None:
+            for child in up_node:
+                key = child.get('name') or ''
+                if key.startswith('m') and key[1:].isdigit():
+                    current[key] = (child.text or '').strip().lower() == 'true'
+
+        if snapshot == current:
+            return 'ok', f"gift.vv 与 upLevelObj 一致（{len(snapshot)} 项）"
+        only_vv = sorted(set(snapshot) - set(current))
+        only_up = sorted(set(current) - set(snapshot))
+        detail = []
+        if only_vv:
+            detail.append(f"仅快照有 {only_vv}")
+        if only_up:
+            detail.append(f"仅当前有 {only_up}")
+        if not detail:                       # 键集合相同 → 值不同
+            changed = [k for k in sorted(snapshot) if snapshot[k] != current[k]]
+            detail.append(f"值不同 {changed}")
+        return 'fail', (f"gift.vv 快照({len(snapshot)}项) ≠ upLevelObj"
+                        f"({len(current)}项)：" + "；".join(detail))
+
+    @staticmethod
     def check_vip_xml(file_path):
-        """VIP 权限越界检测。返回 {title,status,msg}"""
+        """VIP 权限越界检测 + gift.vv 快照二重检测。返回 {title,status,msg}"""
         try:
             vip_errors = []
             vip_level = -1
@@ -2865,11 +3699,24 @@ class DetectionEngine:
                     if required_level > vip_level:
                         vip_errors.append(f"权限越界：[{source}]  VIP{vip_level} 开启了 (m{m_val})")
 
+            # ★ 二重检测：gift.vv（导入时的 upLevelObj 快照）↔ 当前 upLevelObj
+            vv_state, vv_text = DetectionEngine._vip_snapshot_issue(
+                root, vip_level, vip_node=current_vip_node)
+
+            out_lines = []
             if vip_errors:
+                out_lines.append("❌ VIP权限越界")
+                out_lines.extend(vip_errors)
+            if vv_state == 'fail':
+                out_lines.append("❌ VIP二重检测（gift.vv ↔ upLevelObj 快照）")
+                out_lines.append(f"   {vv_text}")
+            if out_lines:
                 return {'title': 'VIP权限检测', 'status': 'fail',
-                        'msg': "❌ VIP权限越界\n" + ''.join(vip_errors)}
-            return {'title': 'VIP权限检测', 'status': 'pass',
-                    'msg': f'VIP:{vip_level}\n无权限异常'}
+                        'msg': "\n".join(out_lines)}
+            msg = f'VIP:{vip_level}\n无权限异常'
+            if vv_state == 'ok':
+                msg += f"\n🔁 二重检测通过：{vv_text}"
+            return {'title': 'VIP权限检测', 'status': 'pass', 'msg': msg}
         except Exception as e:
             return {'title': 'VIP权限检测', 'status': 'fail',
                     'msg': f"解析异常：{str(e)}"}
@@ -3030,6 +3877,26 @@ class DetectionEngine:
                                key=lambda r: (r.get('get_time') or '~', r['cn'] or r['name']))
         unknown_vehicles = sorted((r for r in veh_items.values() if r.get('tag') == 'unknown'),
                                   key=lambda r: (-r['count'], r['cn'] or r['name']))
+        # ★ 超量载具（唯一性载具，如 年兽）：持有量 > 上限即异常；
+        #   恰好 1 个属正常，不输出（不进入任何区块）。
+        over_limit_vehicles = sorted(
+            (r for r in veh_items.values()
+             if vehicle_count_limit(r.get('cn'), r.get('name')) is not None
+             and r['count'] > vehicle_count_limit(r.get('cn'), r.get('name'))),
+            key=lambda r: (-r['count'], r['cn'] or r['name']))
+        # ★ 未记录载具：价格表中查不到记录且**不在载具列表内**（无法核对来源/价值）
+        #   的载具 → 列出供人工复核（信息性输出，不改变状态）。
+        #   排除口径：
+        #     • 图鉴内常规载具（tag='catalog'）—— 未直售属正常，不显示；
+        #     • 免费载具（按设计不展示）、异常/收费/稀有（均有专属区块）；
+        #     • 已登记持有上限的（如 年兽，由上限规则覆盖）。
+        #   即：仅提示「既不在图鉴内、也无价格记录」的载具（另有 稀有载具 区块）。
+        unrecorded_vehicles = sorted(
+            (r for r in veh_items.values()
+             if r.get('price') is None
+             and r.get('tag') not in ('free', 'unknown', 'paid', 'rare', 'catalog')
+             and vehicle_count_limit(r.get('cn'), r.get('name')) is None),
+            key=lambda r: (-r['count'], r['cn'] or r['name']))
         # 稀有时装：免费时装与付费时装之外（碎片合成/活动产出）→ 标注获取时间
         fash_items = summary[ASSET_FASHION]['items']
         rare_fashions = sorted((r for r in fash_items.values() if r.get('tag') == 'rare'),
@@ -3039,9 +3906,10 @@ class DetectionEngine:
         missing_purchases = (collector.find_missing_purchases(summary)
                              if MATCH_PURCHASE_RECORDS else [])
 
-        # 状态判定：出现「差值 > 0」（over / 未匹配收费载具）或异常载具
-        # （不在载具列表内）时判 fail；仅有「购买了但存档内无」判 warn。
-        if over or paid_vehicles or unknown_vehicles:
+        # 状态判定：出现「差值 > 0」（over / 未匹配收费载具）、异常载具
+        # （不在载具列表内）或**超量载具**（如 年兽超过 1 个）时判 fail；
+        # 仅有「购买了但存档内无」判 warn。
+        if over or paid_vehicles or unknown_vehicles or over_limit_vehicles:
             status = 'fail'
         elif missing_purchases:
             status = 'warn'
@@ -3084,6 +3952,10 @@ class DetectionEngine:
             brief_bits.append(f"稀有载具 {len(rare_vehicles)} 种")
         if unknown_vehicles:
             brief_bits.append(f"异常载具 {len(unknown_vehicles)} 种")
+        if over_limit_vehicles:
+            brief_bits.append(f"超量载具 {len(over_limit_vehicles)} 种")
+        if unrecorded_vehicles:
+            brief_bits.append(f"未记录载具 {len(unrecorded_vehicles)} 种")
         if rare_fashions:
             brief_bits.append(f"稀有时装 {len(rare_fashions)} 种")
         if unmatched:
@@ -3097,6 +3969,8 @@ class DetectionEngine:
                'paid_vehicles': [dict(r) for r in paid_vehicles],
                'rare_vehicles': [dict(r) for r in rare_vehicles],
                'unknown_vehicles': [dict(r) for r in unknown_vehicles],
+               'over_limit_vehicles': [dict(r) for r in over_limit_vehicles],
+               'unrecorded_vehicles': [dict(r) for r in unrecorded_vehicles],
                'rare_fashions': [dict(r) for r in rare_fashions],
                'unmatched': unmatched, 'errors': collector.warnings}
         res['msg'] = msg_head + "\n" + ReportRenderer.render_asset_result(res, max_details)
@@ -3125,6 +3999,12 @@ class DetectionEngine:
                               for r in rare_vehicles],
             'unknown_vehicles': [f"{r['cn'] or r['name']}×{r['count']}"
                                  for r in unknown_vehicles],
+            'over_limit_vehicles': [f"{r['cn'] or r['name']}×{r['count']}"
+                                    + f"（上限 {vehicle_count_limit(r.get('cn'), r.get('name'))}）"
+                                    for r in over_limit_vehicles],
+            'unrecorded_vehicles': [f"{r['cn'] or r['name']}×{r['count']}"
+                                    + (f"（{r['get_time']}）" if r.get('get_time') else "")
+                                    for r in unrecorded_vehicles],
             'rare_fashions': [f"{r['cn'] or r['name']}×{r['count']}"
                               + (f"（{r['get_time']}）" if r.get('get_time') else "")
                               for r in rare_fashions],
@@ -3147,6 +4027,12 @@ class DetectionEngine:
                    if missing_purchases else [])
                 + ([f"异常载具 {len(unknown_vehicles)} 种（{('、'.join(r['cn'] or r['name'] for r in unknown_vehicles[:4]))}）"]
                    if unknown_vehicles else [])
+                + ([f"超量载具 {len(over_limit_vehicles)} 种（"
+                    + ('、'.join((r['cn'] or r['name']) + '×' + str(r['count'])
+                                 for r in over_limit_vehicles[:4])) + "）"]
+                   if over_limit_vehicles else [])
+                + ([f"未记录载具 {len(unrecorded_vehicles)} 种（{('、'.join(r['cn'] or r['name'] for r in unrecorded_vehicles[:4]))}）"]
+                   if unrecorded_vehicles else [])
                 + ([f"稀有时装 {len(rare_fashions)} 种（{('、'.join(r['cn'] or r['name'] for r in rare_fashions[:4]))}）"]
                    if rare_fashions else [])
                 + ([f"未定价 {len(unmatched)} 种"] if unmatched else [])
@@ -3368,13 +4254,59 @@ class AppDetector:
         self.logger = RunLogger(on_emit=self._on_log_emit)
         self._log_file = None        # 当前会话实时落盘文件（可选）
 
+        # ★ 跨线程 UI 调度队列：子线程只能把界面操作**投递**到这里，
+        #   由主线程轮询执行。tkinter 的 Tcl 异步处理器归属于创建它的线程，
+        #   直接在子线程调 root.after()/控件方法会在解释器退出时于错误线程清理，
+        #   触发 “Tcl_AsyncDelete: async handler deleted by the wrong thread”
+        #   —— 进程直接中止（日志恰好停在崩溃前最后一行，没有任何报错堆栈）。
+        self._ui_queue = queue.Queue()
+        self._ui_after_id = None
+
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
         self._ensure_dirs()
         self._init_config()
         self._build_ui()
+        self._start_ui_poller()
+
+    # ---------- 主线程 UI 调度 ----------
+    def _start_ui_poller(self):
+        """启动 UI 队列轮询（主线程）。"""
+        self._poll_ui_queue()
+
+    def _ui_call(self, fn, *args, **kwargs):
+        """线程安全：把界面操作排入主线程队列（任意线程均可调用）。"""
+        try:
+            self._ui_queue.put((fn, args, kwargs))
+        except Exception:
+            pass
+
+    def _poll_ui_queue(self):
+        """在主线程执行队列中积累的界面操作，然后重新排程。"""
+        while True:
+            try:
+                fn, args, kwargs = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn(*args, **kwargs)
+            except Exception:
+                pass    # 单个回调失败不影响后续刷新
+        try:
+            self._ui_after_id = self.root.after(50, self._poll_ui_queue)
+        except Exception:
+            self._ui_after_id = None    # 窗口已销毁
+
+    def _stop_ui_poller(self):
+        if self._ui_after_id is not None:
+            try:
+                self.root.after_cancel(self._ui_after_id)
+            except Exception:
+                pass
+            self._ui_after_id = None
 
     # ---------- 基础 ----------
     def _on_closing(self):
+        self._stop_ui_poller()
         try:
             if hasattr(self, 'after_id'):
                 self.root.after_cancel(self.after_id)
@@ -3711,12 +4643,12 @@ class AppDetector:
         self.logger.log(msg, level)
 
     def _on_log_emit(self, ts, level, text):
-        """RunLogger 回调（可能来自子线程）→ 调度到 Tk 主线程刷新界面。"""
-        try:
-            self.root.after(0, self._append_log_line, ts, level, text)
-        except Exception:
-            # 窗口已销毁（如程序退出中）时忽略，保证子线程不因此崩溃
-            pass
+        """RunLogger 回调（**可能来自子线程**）→ 投递队列，由主线程刷新界面。
+
+        ★ 不能在此直接 self.root.after(...)：从子线程调用会给该线程登记 Tcl
+          异步处理器，解释器退出时在错误线程清理 → Tcl_AsyncDelete 崩溃。
+        """
+        self._ui_call(self._append_log_line, ts, level, text)
 
     def _append_log_line(self, ts, level, text):
         log_str = f"[{ts}] [{level}] {text}\n"
@@ -3728,10 +4660,7 @@ class AppDetector:
     def clear_log(self):
         """清空界面与缓冲（线程安全：界面操作始终走主线程）。"""
         self.logger.clear()
-        try:
-            self.root.after(0, self._clear_log_widget)
-        except Exception:
-            pass
+        self._ui_call(self._clear_log_widget)
 
     def _clear_log_widget(self):
         self.log_text.config(state="normal")
@@ -3992,20 +4921,27 @@ class AppDetector:
         messagebox.showinfo("完成", "已尝试从文件名自动识别 UID")
 
     def _open_dir(self, dir_path):
+        """打开目录（可能从检测子线程调用 → 界面部分投递主线程）。"""
         target = app_paths.resolve(dir_path) or dir_path
         if not os.path.exists(target):
             os.makedirs(target)
         try:
-            os.startfile(target)
+            os.startfile(target)        # 与 tkinter 无关，任意线程安全
         except Exception:
-            messagebox.showwarning("提示", "无法自动打开目录，请手动访问")
+            self._ui_call(messagebox.showwarning, "提示", "无法自动打开目录，请手动访问")
 
     # ---------- 下载工具 ----------
     def _run_info_get(self):
+        """打开下载工具（在**主线程**创建 Toplevel 子窗口）。
+
+        ★ 必须在主线程创建窗口：tkinter/Tcl 解释器只能由创建它的线程访问与销毁。
+          旧实现在子线程里调 info_get.run_tool()，那里会再 tk.Tk() 出第二个解释器，
+          退出时于错误线程清理 → “Tcl_AsyncDelete: async handler deleted by the
+          wrong thread”，进程无声中止（即本次待修复的崩溃）。
+        """
         try:
             import info_get
-            t = threading.Thread(target=info_get.run_tool, daemon=True)
-            t.start()
+            info_get.run_tool(parent=self.root)
             self.log("下载工具已启动", "INFO")
         except ImportError:
             self.log("错误：找不到 info_get 模块，请确认已打包", "FAIL")
@@ -4146,8 +5082,9 @@ class AppDetector:
 
     # ---------- 报告 ----------
     def _generate_report(self, auto_ok=False):
+        """生成单文件报告；auto_ok=True 时可能从检测子线程调用。"""
         if not self.current_results:
-            messagebox.showwarning("提示", "暂无检测结果可导出")
+            self._ui_call(messagebox.showwarning, "提示", "暂无检测结果可导出")
             return
         filename = os.path.basename(self.current_file_path)
         name = os.path.splitext(filename)[0]
@@ -4169,7 +5106,7 @@ class AppDetector:
         if auto_ok:
             self.log(f"📄 检测报告已生成：{report_path}", "INFO")
         else:
-            messagebox.showinfo("完成", f"报告已保存：\n{report_path}")
+            self._ui_call(messagebox.showinfo, "完成", f"报告已保存：\n{report_path}")
 
     # ---------- 异常详情汇总辅助 ----------
     @staticmethod
@@ -4244,10 +5181,8 @@ class AppDetector:
 
     @staticmethod
     def _uid_index_name(uid_index, name):
-        """拼装 uid_index_name 展示形式（无 name 时回退到纯 uid_index）。"""
-        if not uid_index or uid_index == '无':
-            return '无'
-        return f"{uid_index}_{name}" if name else str(uid_index)
+        """拼装 uid_index_name 展示形式（委托 ReportRenderer，保持单一实现）。"""
+        return ReportRenderer._uid_index_name(uid_index, name)
 
     @classmethod
     def _build_uid_groups(cls, file_result_map, uid_max_vip, uid_assets, max_details):
@@ -4290,10 +5225,14 @@ class AppDetector:
             # 资产明细：只要采集到资产就输出（含 pass），供详情文件展示资产清单
             asset_res = res.get('asset_res') or {}
             asset_lines = []
+            asset_slot = {}
             if asset_res.get('kinds'):
                 asset_lines = ReportRenderer.render_asset_result(
                     asset_res, max_details
                 ).split('\n')
+                # ★ 槽位级资产摘要（本存档自身口径）：CSV 改为「每 index 一行」后，
+                #   资产列必须取本槽位的值，不能沿用 UID 合并后的最大值。
+                asset_slot = ReportRenderer.build_slot_asset_summary(asset_res)
 
             uid_group.setdefault(group_uid, []).append({
                 'fname': fname,
@@ -4310,6 +5249,7 @@ class AppDetector:
                 'ban_tag': res.get('ban_tag', ''),
                 'detail_lines': detail_lines,
                 'asset_lines': asset_lines,
+                'asset': asset_slot,
                 'issues': issues,
             })
 
@@ -4533,6 +5473,8 @@ class AppDetector:
                 'paid': {},      # 名称 -> rec（收费载具）
                 'rare': {},      # 名称 -> rec（稀有载具）
                 'rare_fash': {},  # 名称 -> rec（稀有时装）
+                'over_limit': {},  # 名称 -> rec（超量载具，如 年兽 >1）
+                'unrecorded': {},  # 名称 -> rec（未记录载具：价格表无记录）
             })
             snapshot_value = 0
             snapshot_count = 0
@@ -4573,7 +5515,9 @@ class AppDetector:
                     entry['missing'][key] = rec
             # 收费/稀有载具、稀有时装：取持有量最多的快照，并保留最早的获取时间
             for field, bucket in (('paid_vehicles', 'paid'), ('rare_vehicles', 'rare'),
-                                  ('rare_fashions', 'rare_fash')):
+                                  ('rare_fashions', 'rare_fash'),
+                                  ('over_limit_vehicles', 'over_limit'),
+                                  ('unrecorded_vehicles', 'unrecorded')):
                 for rec in (asset.get(field) or []):
                     name = rec.get('cn') or rec.get('name')
                     if not name:
@@ -4604,12 +5548,16 @@ class AppDetector:
                 if r['kind'] == ASSET_PARTS:
                     head += (f"折算当量{r.get('held_equiv', r['count'])}"
                              f"−应有{r.get('explainable') or 0}")
-                    detail = " + ".join(b for b in (
-                        f"付费{r.get('pay') or 0}" if r.get('pay') else "",
-                        f"券购{r['ticket_buy']}" if r.get('ticket_buy') else "",
-                        f"塔领{r['tower_claimed']}" if r.get('tower_claimed') else "",
-                        f"活动{r['adjust']}" if r.get('adjust') else "",
-                    ) if b)
+                    if r.get('version_limit'):
+                        detail = f"版本上限{r['version_limit']}"
+                    else:
+                        detail = " + ".join(b for b in (
+                            f"付费{r.get('pay') or 0}" if r.get('pay') else "",
+                            f"券购{r['ticket_buy']}" if r.get('ticket_buy') else "",
+                            f"塔领{r['tower_claimed']}" if r.get('tower_claimed') else "",
+                            f"礼包{r['gift_claimed']}" if r.get('gift_claimed') else "",
+                            f"活动{r['adjust']}" if r.get('adjust') else "",
+                        ) if b)
                     if detail:
                         head += f"（{detail}）"
                 else:
@@ -4628,6 +5576,10 @@ class AppDetector:
                                key=lambda r: (r.get('get_time') or '~', r.get('cn') or ''))
             rare_fash_list = sorted(entry['rare_fash'].values(),
                                     key=lambda r: (r.get('get_time') or '~', r.get('cn') or ''))
+            over_limit_list = sorted(entry['over_limit'].values(),
+                                     key=lambda r: (-r.get('count', 0), r.get('cn') or ''))
+            unrecorded_list = sorted(entry['unrecorded'].values(),
+                                     key=lambda r: (-r.get('count', 0), r.get('cn') or ''))
             reason_bits = []
             if over_txt:
                 reason_bits.append(over_txt)
@@ -4654,6 +5606,17 @@ class AppDetector:
                         f"{r.get('cn') or r.get('name')}×{r.get('count', 0)}"
                         + (f"({r['get_time']})" if r.get('get_time') else "")
                         for r in rare_fash_list[:4]))
+            if over_limit_list:
+                reason_bits.append(
+                    "超量载具 " + "、".join(
+                        (r.get('cn') or r.get('name')) + '×' + str(r.get('count', 0))
+                        + f"（上限{vehicle_count_limit(r.get('cn'), r.get('name'))}）"
+                        for r in over_limit_list[:4]))
+            if unrecorded_list:
+                reason_bits.append(
+                    "未记录载具 " + "、".join(
+                        f"{r.get('cn') or r.get('name')}×{r.get('count', 0)}"
+                        for r in unrecorded_list[:4]))
             if entry['unmatched']:
                 reason_bits.append(f"未定价 {len(entry['unmatched'])} 种")
             out[uid] = {
@@ -4667,6 +5630,8 @@ class AppDetector:
                 'paid_vehicles': paid_list,
                 'rare_vehicles': rare_list,
                 'rare_fashions': rare_fash_list,
+                'over_limit_vehicles': over_limit_list,
+                'unrecorded_vehicles': unrecorded_list,
             }
         return out
 
@@ -4814,7 +5779,8 @@ class AppDetector:
         with open(csv_report_path, 'w', encoding='utf-8-sig', newline='') as f:
             writer = csv.writer(f)
             writer.writerows(csv_rows)
-        self.log(f"📊 CSV报告已生成：{csv_report_path} (共{len(uid_rows)}条异常/警告记录)", "INFO")
+        self.log(f"📊 CSV报告已生成：{csv_report_path} "
+                 f"(共{len(csv_rows) - 1}行 = 异常存档条目，涉及 {len(uid_rows)} 个账号)", "INFO")
         if self._get_bool('auto_open_batch_report', False):
             self._open_dir(OUTPUT_DIR)
 

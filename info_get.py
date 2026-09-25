@@ -38,6 +38,7 @@ import asyncio
 import aiohttp
 import json
 import threading
+import queue
 import csv
 import configparser
 from pathlib import Path
@@ -433,7 +434,59 @@ class App:
         self.ban_list = []
         self.fail_list = []   # 失败槽位: (uid, idx, out, msg, ban_status)
 
+        # ★ 跨线程 UI 调度队列：子线程只能**投递**界面操作，由主线程轮询执行。
+        #   tkinter 的 Tcl 异步处理器归属于创建它的线程，子线程直接调
+        #   root.after()/控件方法会在解释器退出时于错误线程清理，触发
+        #   “Tcl_AsyncDelete: async handler deleted by the wrong thread”
+        #   —— 进程直接中止。
+        self._ui_queue = queue.Queue()
+        self._ui_after_id = None
+        self._alive = True
+
         self.build_ui()
+        self._poll_ui_queue()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    # ---------------- 主线程 UI 调度 ----------------
+    def _ui_call(self, fn, *args, **kwargs):
+        """线程安全：把界面操作排入主线程队列（任意线程均可调用）。"""
+        try:
+            self._ui_queue.put((fn, args, kwargs))
+        except Exception:
+            pass
+
+    def _poll_ui_queue(self):
+        """在主线程执行队列中积累的界面操作，然后重新排程。"""
+        while self._alive:
+            try:
+                fn, args, kwargs = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn(*args, **kwargs)
+            except Exception:
+                pass    # 单个回调失败不影响后续刷新
+        if not self._alive:
+            return
+        try:
+            self._ui_after_id = self.root.after(50, self._poll_ui_queue)
+        except Exception:
+            self._ui_after_id = None    # 窗口已销毁
+
+    def on_close(self):
+        """关闭窗口：停止轮询并销毁，确保 Tcl 在主线程清理。"""
+        self._alive = False
+        self.stop_flag = True       # 通知下载任务退出
+        if self._ui_after_id is not None:
+            try:
+                self.root.after_cancel(self._ui_after_id)
+            except Exception:
+                pass
+            self._ui_after_id = None
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
 
     # ---------------- UI ----------------
     def build_ui(self):
@@ -518,12 +571,16 @@ class App:
 
     # ---------------- 日志 ----------------
     def log(self, msg, tag=None):
-        def _do():
-            self.log_text.config(state=tk.NORMAL)
-            self.log_text.insert(tk.END, msg + "\n", tag or "")
-            self.log_text.see(tk.END)
-            self.log_text.config(state=tk.DISABLED)
-        self.root.after(0, _do)
+        """线程安全日志入口：任意线程可调，界面刷新投递到主线程。"""
+        self._ui_call(self._append_log, msg, tag)
+
+    def _append_log(self, msg, tag=None):
+        if not self._alive:
+            return
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.insert(tk.END, msg + "\n", tag or "")
+        self.log_text.see(tk.END)
+        self.log_text.config(state=tk.DISABLED)
 
     def log_error(self, msg):
         self.log(msg, "error")
@@ -532,11 +589,14 @@ class App:
         self.log(msg, "warn")
 
     def clear_log(self):
-        def _do():
-            self.log_text.config(state=tk.NORMAL)
-            self.log_text.delete(1.0, tk.END)
-            self.log_text.config(state=tk.DISABLED)
-        self.root.after(0, _do)
+        self._ui_call(self._clear_log_widget)
+
+    def _clear_log_widget(self):
+        if not self._alive:
+            return
+        self.log_text.config(state=tk.NORMAL)
+        self.log_text.delete(1.0, tk.END)
+        self.log_text.config(state=tk.DISABLED)
 
     # ---------------- 申请节流 ----------------
     def _on_throttle(self, msg, warn=False):
@@ -554,6 +614,11 @@ class App:
 
     def _set_running(self, running):
         self.is_running = running
+        self._ui_call(self._apply_running_state, running)
+
+    def _apply_running_state(self, running):
+        if not self._alive:
+            return
         state = tk.NORMAL if not running else tk.DISABLED
         self.import_folder_btn.config(state=state)
         self.stop_btn.config(state=tk.NORMAL if running else tk.DISABLED)
@@ -631,49 +696,59 @@ class App:
 
     # ---------------- 账号转UID ----------------
     def get_uid_thread(self):
-        threading.Thread(target=self.get_uid, daemon=True).start()
-
-    def get_uid(self):
+        """主线程：先取值再启动子线程（tkinter 控件只能在主线程读）。"""
         user = self.user_entry.get().strip()
+        threading.Thread(target=self.get_uid, args=(user,), daemon=True).start()
+
+    def get_uid(self, user=""):
+        """账号转 UID（在子线程运行 → 界面操作全部投递主线程）。"""
         if not user:
-            messagebox.showwarning("提示", "输入账号")
+            self._ui_call(messagebox.showwarning, "提示", "输入账号")
             return
-        self.status_var.set("检测中...")
+        self._ui_call(self.status_var.set, "检测中...")
         if not self.archiver.check_account_exists(user):
-            messagebox.showerror("错误", "账号不存在")
-            self.status_var.set("失败")
+            self._ui_call(messagebox.showerror, "错误", "账号不存在")
+            self._ui_call(self.status_var.set, "失败")
             return
         uid = self.archiver.get_uid_from_account(user)
         if uid:
-            self.uid_entry.delete(0, tk.END)
-            self.uid_entry.insert(0, uid)
-            self.status_var.set("✅ UID获取成功")
+            self._ui_call(self._fill_uid, uid)
+            self._ui_call(self.status_var.set, "✅ UID获取成功")
         else:
-            messagebox.showerror("错误", "获取失败")
-            self.status_var.set("失败")
+            self._ui_call(messagebox.showerror, "错误", "获取失败")
+            self._ui_call(self.status_var.set, "失败")
+
+    def _fill_uid(self, uid):
+        """主线程：把 UID 写入输入框。"""
+        if not self._alive:
+            return
+        self.uid_entry.delete(0, tk.END)
+        self.uid_entry.insert(0, uid)
 
     # ---------------- 指定UID整账号下载 ----------------
     def start_single(self):
-        threading.Thread(target=self.run_single, daemon=True).start()
-
-    def run_single(self):
+        """主线程：先取值再启动子线程（tkinter 控件只能在主线程读）。"""
         uid = self.uid_entry.get().strip()
+        threading.Thread(target=self.run_single, args=(uid,), daemon=True).start()
+
+    def run_single(self, uid=""):
+        """指定 UID 下载（在子线程运行 → 界面操作全部投递主线程）。"""
         if not uid or not uid.isdigit():
-            messagebox.showwarning("提示", "输入有效UID")
+            self._ui_call(messagebox.showwarning, "提示", "输入有效UID")
             return
-        self.status_var.set("下载中...")
+        self._ui_call(self.status_var.set, "下载中...")
         self._setup_throttle()
         try:
             results = asyncio.run(self.archiver.download_account(uid, update_log=self.log))
             ok = sum(1 for r in results if r.get("status") == "正常")
             empty = sum(1 for r in results if r.get("status") == STATUS_EMPTY_SLOT)
             too_fast = sum(1 for r in results if r.get("status") == STATUS_TOO_FAST)
-            self.status_var.set("✅ 单UID下载完成")
+            self._ui_call(self.status_var.set, "✅ 单UID下载完成")
             self.log(f"下载完成：正常 {ok} 槽，未创建存档 {empty} 槽"
                      + (f"，{STATUS_TOO_FAST} {too_fast} 槽" if too_fast else ""))
         except Exception as e:
             self.log_error(f"错误：{str(e)}")
-            self.status_var.set("下载失败")
+            self._ui_call(self.status_var.set, "下载失败")
 
     # ---------------- 批量下载 ----------------
     def start_precise_batch(self):
@@ -716,13 +791,12 @@ class App:
             self.log_error(f"错误：{e}")
         finally:
             loop.close()
-            self.root.after(0, self.on_task_complete)
+            self.on_task_complete()
 
     async def run_precise_task(self):
         self.total_tasks = len(self.tasks)   # 按整账号计数（每账号下载 1~8 槽）
-        self.progress["maximum"] = self.total_tasks
-        self.progress["value"] = 0
-        self.status_var.set("批量下载中...")
+        self._ui_call(self._set_total_tasks_ui, self.total_tasks)
+        self._ui_call(self.status_var.set, "批量下载中...")
         self.log(f"===== 开始批量下载，共 {self.total_tasks} 个账号（每账号下载 1~8 全部槽位）=====")
         self.log(f"⏱ 申请节流：每申请 {REQUEST_BATCH_SIZE} 个存档暂停 {REQUEST_PAUSE_TIME} 秒")
 
@@ -829,13 +903,32 @@ class App:
 
         await asyncio.gather(*[retry_one(*x[:3]) for x in normal])
 
+    def _set_total_tasks_ui(self, total):
+        """主线程：重置进度条量程。"""
+        if not self._alive:
+            return
+        self.progress["maximum"] = total
+        self.progress["value"] = 0
+
     def _refresh_progress(self):
         # 进度按账号计数推进，与槽位成功/失败/封禁统计解耦
         done = min(self._account_done, self.total_tasks)
+        total = self.total_tasks
+        self._ui_call(self._refresh_progress_ui, done, total)
+
+    def _refresh_progress_ui(self, done, total):
+        if not self._alive:
+            return
         self.progress["value"] = done
-        self.task_var.set(f"账号 {done}/{self.total_tasks}")
+        self.task_var.set(f"账号 {done}/{total}")
 
     def on_task_complete(self):
+        """下载结束（可能从子线程调）→ 界面更新全部走主线程。"""
+        self._ui_call(self._on_task_complete_ui)
+
+    def _on_task_complete_ui(self):
+        if not self._alive:
+            return
         self._set_running(False)
         self.stop_flag = False
         self._refresh_progress()
@@ -858,11 +951,25 @@ class App:
                                    f"未创建存档：{self.empty_count}\n申请过快：{self.toofast_count}")
 
 
-def run_tool():
-    """可被外部(检测主程序)调用的启动函数"""
+def run_tool(parent=None):
+    """启动下载工具界面。
+
+    parent 非空时创建 **Toplevel 子窗口**（复用主程序的 Tcl 解释器，可被子窗口
+    与主程序共用 UI 线程）；parent 为空时创建独立 Tk 根窗口（单独运行/打包）。
+
+    ★ 必须在主线程调用：tkinter 的 Tcl 解释器只能由创建它的线程访问与销毁。
+      旧实现在子线程里调本函数，内部再 tk.Tk() 出第二个解释器，退出时于错误
+      线程清理 → “Tcl_AsyncDelete: async handler deleted by the wrong thread”，
+      进程无声中止。
+    """
+    if parent is not None:
+        win = tk.Toplevel(parent)
+        App(win)
+        return win
     root = tk.Tk()
-    app = App(root)
+    App(root)
     root.mainloop()
+    return root
 
 
 if __name__ == "__main__":
