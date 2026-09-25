@@ -12,12 +12,15 @@ main (γ 合并版) v3.1.0 —— 数据检测工具（军队/公会成员存档
   4. 👑 VIP权限检测      vip 节点 m 权限越界
   5. 💰 金币消费检测     bin 价格表解密 → 全部消费明细 + 高价/高频预警
   6. 💎 VIP联合检测      按同一 UID 累计消费估算，判断“覆盖存档”与超额度消耗（修复原β计算bug）
-  7. 🧩 资产检测（新增）  时装 / 载具 / 特殊零件 的持有量、价值（对照 good_items.csv）
+  7. 🧩 资产差值检测     ★ 重点不是估值，而是找出「持有量 ≠ 应有总量」的差值
+                       （差值 > 0 = 来源说不清，疑似异常修改存档，交人工复核）：
+                         差值 = 持有量 − 应有总量
+                         应有总量 = 付费次数 + 免费额度（活动/掉落/赠送等）
+                         稀有零件：应有 = 付费 + 券购 + 塔领 + 活动修正
                        付费载具 / 付费时装与购买记录(pay.obj)双向比对：
                          「未购买但存档内拥有」与「购买了但存档内无」会输出，
                          能正常匹配（购买记录 ≥ 持有量）的不输出
-                       超额 = 持有量 − 免费额度 − 付费次数
-                       （免费额度见 inputdata/free_quota.ini，可自行调整）
+                       免费额度 / 活动修正见 inputdata/free_quota.ini，可自行调整
                        • 节点：equip/equipBag/equipHouse、partsBag、arms/armsBag/armsHouse
                          （含武器镶嵌位 partsSave），以及队友存档 more/moreBag→SAVE
                        • 零件按 objType 分类（权威定义见 partsType.ts 注释），
@@ -226,20 +229,21 @@ RARE_PARTS_LEVEL_STEP = 3       # 普通零件等级间隔（PartsConst.cLv）
 RARE_PARTS_MAX_LEVEL = 96       # 当前零件等级上限
 CHIP_MARK = "碎片"              # 碎片为合成材料，不参与计价
 
-# ---- 统一的持有异常判定（融合「高价值 / 高频购买 / 持有量>付费」三套口径）----
-# 旧实现分别用「单价>min_money」「次数>min_number」「持有≠付费」三个独立阈值判断，
-# 三者互不关联、重复报同一件事。现统一为一个规则：
+# ---- 统一的持有「差值」判定 ★ 本检测的核心，不是估值 ----
+# 目的：找出存档里「来源说不清」的物品 —— 持有量与应有总量对不上，
+#       通常意味着存档被异常修改。价值只作辅助（多出来多少、大概值多少）：
 #
-#     超额数量 = max(0, 持有量 − 免费额度 − 付费次数)
-#     超额价值 = 单价 × 超额数量
+#     差值数量 = max(0, 持有量 − 应有总量)
+#     应有总量 = 付费次数 + 免费额度（活动/掉落/赠送等免费渠道，见 free_quota.ini）
+#     差值价值 = 单价 × 差值数量    ← 仅用于排序/展示，**不参与「是否异常」的判断**
 #
-# 免费额度 = 该物品允许免费/活动获取的份数（配置见 free_quota.ini），
-# 超出免费额度的部分才需要付费解释；若仍未超出付费次数，则属正常。
-# 「超额价值」达到 abnormal_min_value 才判为异常 → 一次报清“多了多少、值多少”。
+# ★ 未定价物品同样判定：只要差值 > 0 就报（估值缺失不影响差值检测）。
+#   仅当 free_quota.ini 的 [default] min_excess_value > 0 时，才用估值做降噪，
+#   默认 0 = 只要能算出差值就全部报出，交人工复核。
 DEFAULT_FREE_QUOTA = 3          # 未在 free_quota.ini 中登记时的默认免费额度（份）
 FREE_QUOTA_FILE = os.path.join(INPUT_DIR, "free_quota.ini")
 FREE_QUOTA_FILE_REL = os.path.join("inputdata", "free_quota.ini")   # 相对写法
-# 判定为异常所需的超额价值下限（黄金）。低于该值仅属正常波动，不报异常。
+# 仅用于降噪的差值价值门槛（黄金）。0 = 只要有差值就报（检测优先，推荐）。
 # 不设界面参数，可在 free_quota.ini 的 [default] min_excess_value 中调整。
 DEFAULT_ABNORMAL_MIN_VALUE = 0
 
@@ -254,7 +258,7 @@ MATCH_PURCHASE_RECORDS = True
 CONCISE_REPORT = True
 MAX_REPORT_ITEMS = 5
 
-# 免费额度取「无限」的哨兵值（该零件在零件券商店无限购 → 不存在超额）。
+# 免费额度取「无限」的哨兵值（可无限免费获取 → 不存在差值）。
 # free_quota.ini 中可写 unlimited / 无限 / -1 表示。
 FREE_QUOTA_UNLIMITED = -1
 
@@ -358,13 +362,29 @@ PARTS_BASE_TO_CN = {
     "mooncakeParts": "月饼子弹", "digWallParts": "挖墙弹", "fireParts": "火焰球",
     "electricParts": "电磁球", "noHurtParts": "枪口塞", "uidpsParts": "调表器",
     "crushCube": "绞杀体", "demCapacityParts": "修罗弹夹", "fourEleParts": "四素球",
+    # 材料合成的稀有零件（配方见文件头：58_XMLOut_thingsComposeClass.bin）
+    "purgoldCpu": "紫金之芯", "poisonParts": "生化球", "oldBulletCube": "老弹体",
+    "betrayParts": "叛变器", "followParts": "跟踪器",
 }
 PARTS_CN_TO_BASE = {cn: base for base, cn in PARTS_BASE_TO_CN.items()}
+
+
+def rare_parts_cn_names():
+    """全部已知稀有零件的中文名（按对照表顺序，供生成 [parts_adjust] 列表）。"""
+    names = list(PARTS_BASE_TO_CN.values())
+    names += [cn for cn in FREE_QUOTA_PARTS if cn not in names]
+    return names
 FREE_QUOTA_FASHION = {}         # 时装默认全部取 DEFAULT_FREE_QUOTA
 FREE_QUOTA_VEHICLE = {}         # 载具同上
 
-# 免费额度表：{kind: {中文名: 额度}}，由 free_quota.ini 载入（见 load_free_quota）
-FREE_QUOTA_TABLES = {ASSET_FASHION: {}, ASSET_VEHICLE: {}, ASSET_PARTS: {}}
+# ★ 稀有零件的「活动修正」：活动/兑换码/赠送等**存档内查不到记录**的来源，
+#   无法从存档自动统计，只能按零件人工登记 —— 即 free_quota.ini 的 [parts_adjust]。
+#   差值 = 持有一阶当量 −（付费 + 券购 + 塔领 + 活动修正）
+ASSET_PARTS_ADJUST = 'parts_adjust'
+
+# 免费额度表：{kind: {名称: 额度}}，由 free_quota.ini 载入（见 load_free_quota）
+FREE_QUOTA_TABLES = {ASSET_FASHION: {}, ASSET_VEHICLE: {},
+                     ASSET_PARTS: {}, ASSET_PARTS_ADJUST: {}}
 _free_quota_path = None
 _free_quota_error = ''
 
@@ -375,15 +395,29 @@ def _default_free_quota_ini():
     每个 section 对应一个资产类别；键=物品中文名（或英文名），值=允许免费获取的份数。
     """
     lines = [
-        "; 免费额度配置 —— 每种稀有零件/时装/载具允许免费（活动、掉落、赠送）获取的份数",
-        "; 判定规则：持有量 − 免费额度 − 付费次数 = 超额，超出即判为异常",
-        "; 零件额度 = 零件券商店限购数 + 虚天塔一次性奖励（两者都不花黄金）：",
-        ";   ① 56_XMLOut_partsCoinClass.bin 的 buyLimitNum",
-        ";   ② TowerDefineCtrl.as 各层 giftStr（每层 1 个一阶，通关即领、仅一次）",
-        "; 值可写 unlimited / 无限 / -1 表示不限（该零件在商店中未设限购）",
+        "; 免费额度配置 —— ★ 本工具的核心是「差值检测」：找出持有量与应有总量对不上的物品",
+        ";   差值 = 持有量 − 应有总量；应有总量 = 付费次数 + 免费额度",
+        ";   · 时装：应有 = 免费额度（[fashion]/[default]）+ 付费次数",
+        ";   · 零件：应有 = 付费 + 券购 + 塔领（存档实际记录）+ 活动修正（[parts_adjust]）",
+        ";   · 载具：不参与本差额判定（由 收费/稀有/免费/异常 分类覆盖）",
+        "; 差值只与数量有关，与单价/估值无关 —— 未定价物品同样会报",
+        "; 值可写 unlimited / 无限 / -1 表示不限（不存在差值）",
         "; 修改后重新检测即可生效；未列出的物品取 default 值",
         "",
+        "[parts_adjust]",
+        "; ★ 活动修正参数：活动/兑换/赠送等**存档内查不到记录**的来源，按零件登记份数",
+        ";   差值 = 持有一阶当量 −（付费 + 券购 + 塔领 + 本值）；不确定就保持 0",
+    ]
+    for cn in rare_parts_cn_names():
+        lines.append(f"{cn} = 0")
+    lines += [
+        "",
         "[parts]",
+        "; 零件理论免费上限 = 零件券商店限购数 + 虚天塔一次性奖励（两者都不花黄金）：",
+        ";   ① 56_XMLOut_partsCoinClass.bin 的 buyLimitNum",
+        ";   ② TowerDefineCtrl.as 各层 giftStr（每层 1 个一阶，通关即领、仅一次）",
+        "; 注：差值判定从存档实际读取券购/塔领（更准），故本表仅作上限参考，不参与求和；",
+        ";     若要用「理论上限」替代实际记录（活动无法逐笔登记时），改此表无效，请用 [parts_adjust]",
         "; 特殊零件（同名不同等级共用同一额度）",
     ]
     for cn, q in sorted(FREE_QUOTA_PARTS.items(), key=lambda kv: (kv[1] < 0, -kv[1])):
@@ -391,27 +425,28 @@ def _default_free_quota_ini():
     lines += [
         "",
         "[fashion]",
-        "; 时装：未列出的按 [default] quota 判定；如需单独指定，取消下行注释并修改",
+        "; 时装免费额度 = 活动/赠送等免费渠道允许的份数（差值 = 持有 − 本值 − 付费次数）",
+        "; 未列出的取 [default] quota；如需单独指定，取消下行注释并修改",
         "; 示例 = 1",
-        "; 注：免费时装（小7/小娜/扶光/望舒/红魔/小卡/小隆/小田时装）不做限额判定；",
-        ";     稀有时装（免费与付费之外的时装）额度固定为 0 —— 持有即返回",
+        "; 注：免费时装（小7/小娜/扶光/望舒/红魔/小卡/小隆/小田时装）不做差值判定；",
+        ";     稀有时装（免费与付费之外的时装）单列「稀有时装」区块，持有即列出（含获取时间）",
     ]
     for cn, q in sorted(FREE_QUOTA_FASHION.items()):
         lines.append(f"{cn} = {q}")
     lines += [
         "",
         "[vehicle]",
-        "; 载具：合法性由收费/稀有/免费/异常载具分类覆盖，不参与限额判定",
+        "; 载具：合法性由收费/稀有/免费/异常载具分类覆盖（存在性差值），不参与本差额判定",
     ]
     for cn, q in sorted(FREE_QUOTA_VEHICLE.items()):
         lines.append(f"{cn} = {q}")
     lines += [
         "",
         "[default]",
-        "; 未在上方登记的物品所使用的默认免费额度",
+        "; 未在上方登记的物品所使用的默认免费额度（时装用；零件请用 [parts_adjust]）",
         f"quota = {DEFAULT_FREE_QUOTA}",
-        "; 超额价值门槛（黄金）：超额部分的价值低于该值时不报异常（0 = 只要有超额就报）",
-        "; 未定价物品不适用本门槛（无法估值，只要超额就报数量）",
+        "; 仅降噪用：差值价值低于该值时不报异常（0 = 只要有差值就全部报出，推荐）",
+        "; 差值判定本身与估值无关，未定价物品同样会报",
         f"min_excess_value = {DEFAULT_ABNORMAL_MIN_VALUE}",
         "",
     ]
@@ -433,16 +468,43 @@ def ensure_free_quota_ini(path=None):
     return target
 
 
+def _ensure_parts_adjust_section(target):
+    """旧配置若缺少 [parts_adjust]（活动修正参数）→ 自动补一段全 0。
+
+    活动/兑换/赠送等来源在存档内**没有记录**（无 pay、无券购、无塔），
+    只能人工登记；为让修正参数开箱可见，缺失时补到文件末尾（不改变既有判定）。
+    """
+    try:
+        with open(target, 'r', encoding='utf-8-sig') as f:
+            text = f.read()
+    except OSError:
+        return False
+    if re.search(r'^\s*\[parts_adjust\]', text, re.M | re.IGNORECASE):
+        return False
+    block = ["", "[parts_adjust]",
+             "; ★ 活动修正参数：活动/兑换/赠送等**存档内查不到记录**的来源，按零件登记份数",
+             ";   差值 = 持有一阶当量 −（付费 + 券购 + 塔领 + 本值）；不确定就保持 0"]
+    block += [f"{cn} = 0" for cn in rare_parts_cn_names()]
+    try:
+        # 用 utf-8（非 utf-8-sig）追加：避免在文件中间写入 BOM
+        with open(target, 'a', encoding='utf-8') as f:
+            f.write("\n".join(block) + "\n")
+    except OSError:
+        return False
+    return True
+
+
 def load_free_quota(path=None, force=False):
     """从 free_quota.ini 载入免费额度表。
 
     结构（section 名对应资产类别，键=物品中文名/英文名）：
-        [parts]   宽震器 = 20            # 零件券商店限购数
-                  枪口塞 = unlimited     # 商店未设限购 → 不判超额
-        [fashion] 示例 = 1
-        [vehicle] （载具不参与限额判定）
-        [default] quota = 3            # 未登记物品的默认免费额度
-                  min_excess_value = 0  # 超额价值门槛（0 = 有超额就报）
+        [parts_adjust] 宽震器 = 1        # ★ 活动/赠送等「存档内无记录」来源的修正份数
+        [parts]   宽震器 = 20            # 零件理论免费上限（券商店限购 + 塔），仅参考
+                  枪口塞 = unlimited     # 商店未设限购
+        [fashion] 示例 = 1               # 免费渠道允许份数（差值 = 持有 − 本值 − 付费）
+        [vehicle] （载具不参与差额判定）
+        [default] quota = 0            # 未登记物品的默认免费额度
+                  min_excess_value = 0  # 仅降噪：差值价值门槛（0 = 有差值就报）
 
     返回 (tables, error)；tables 为 {kind: {名称: 额度}}。
     同一路径只加载一次（除非 force=True）。
@@ -462,7 +524,7 @@ def load_free_quota(path=None, force=False):
         error = f"读取免费额度配置失败：{e}"
 
     section_kind = {"parts": ASSET_PARTS, "fashion": ASSET_FASHION,
-                    "vehicle": ASSET_VEHICLE}
+                    "vehicle": ASSET_VEHICLE, "parts_adjust": ASSET_PARTS_ADJUST}
     for kind in FREE_QUOTA_TABLES:
         FREE_QUOTA_TABLES[kind] = {}
     if not error:
@@ -481,7 +543,7 @@ def load_free_quota(path=None, force=False):
                 # 负数 = 不限（-1 等）；其余按正数处理
                 FREE_QUOTA_TABLES[kind][name.strip()] = (
                     FREE_QUOTA_UNLIMITED if quota < 0 else quota)
-        # [default]：未登记物品的默认免费额度 + 超额价值门槛
+        # [default]：未登记物品的默认免费额度 + 差值价值降噪门槛
         if parser.has_section("default"):
             try:
                 DEFAULT_FREE_QUOTA = max(
@@ -498,6 +560,11 @@ def load_free_quota(path=None, force=False):
 
     _free_quota_path = target
     _free_quota_error = error
+    # 旧配置补齐 [parts_adjust]（活动修正参数），使差值公式的四个来源都可见
+    if not error and not FREE_QUOTA_TABLES.get(ASSET_PARTS_ADJUST):
+        if _ensure_parts_adjust_section(target):
+            for cn in rare_parts_cn_names():
+                FREE_QUOTA_TABLES[ASSET_PARTS_ADJUST].setdefault(cn, 0)
     return FREE_QUOTA_TABLES, _free_quota_error
 
 
@@ -567,7 +634,7 @@ def decode_text32_number(text, default=None):
 FREE_FASHION_NAMES = (
     "小7时装", "小娜时装", "扶光时装", "望舒时装",
     "红魔时装", "小卡时装", "小隆时装", "小田时装",
-    "小蚁时装", "工人帽"
+    "小蚁时装", "工人帽", "狼首"
 )
 # 归一化后的匹配集合（去掉 _数字 后缀等差异，容错“小7时装/小7”写法）
 FREE_FASHION_SET = frozenset(FREE_FASHION_NAMES)
@@ -1130,12 +1197,12 @@ class ReportRenderer:
                              key=lambda x: (-((x.get('price') or 0) * x['count']),
                                             -(x.get('count') or 0),
                                             x['cn'] or x['name']))
-            # ---- 明细展示口径：只列「需人工复核」的行 ----
+            # ---- 明细展示口径：只列「有差值、需人工复核」的行 ----
             #   • 载具：收费(paid) / 稀有(rare)。免费载具与图鉴内常规载具不展示
             #     （异常载具由下方专属区块单独列出）；
             #     收费载具**与购买记录正常匹配（购买记录 ≥ 持有量）的不展示**。
-            #   • 时装 / 特殊零件：**持有量 > 免费额度 + 付费次数** 才展示。
-            #     稀有零件按 baseLabel 全族合并判定，超额只落在代表记录上，
+            #   • 时装 / 特殊零件：**持有量 > 应有总量（差值 > 0）** 才展示。
+            #     稀有零件按 baseLabel 全族合并判定，差值只落在代表记录上，
             #     故一族的全部阶只输出一行（行内含各阶折算明细）。
             if kind == ASSET_VEHICLE:
                 ordered = [r for r in ordered
@@ -1147,15 +1214,15 @@ class ReportRenderer:
                 priced = sum(r['count'] for r in ordered if r.get('price') is not None)
                 value = sum((r.get('price') or 0) * r['count'] for r in ordered)
                 lines.append(f"  [{cn}] 共 {total} 件"
-                             f"（可计价 {priced} 件，价值 {value}）")
+                             f"（可计价 {priced} 件，参考估值 {value} 金）")
             else:
                 n_excess = sum(1 for r in ordered if r.get('excess'))
                 lines.append(f"  [{cn}] 共 {data['total']} 件"
-                             f"（可计价 {data['priced']} 件，价值 {data['value']}）"
-                             + (f"｜⚠️超额 {n_excess} 项" if n_excess else "｜无超额"))
+                             + (f"｜⚠️差值 {n_excess} 项" if n_excess else "｜✅ 无差值")
+                             + f"（估值仅供参考 {data['value']} 金）")
                 ordered = [r for r in ordered if r.get('excess')]
                 if not ordered:
-                    lines.append("      （持有量均在免费额度+付费次数内）")
+                    lines.append("      （持有量 ≤ 应有总量，来源说得清）")
                     continue
             limit = max_details if max_details and max_details > 0 else len(ordered)
             for rec in ordered[:limit]:
@@ -1164,14 +1231,15 @@ class ReportRenderer:
                 lines.append(f"      … 其余 {len(ordered) - limit} 项已省略"
                              f"（可在设置中调大“明细最大条数”）")
         if res.get('abnormal'):
-            lines.append("  🚨 未购买但存档内拥有（实际持有 > 应有总量，需人工复核）：")
+            lines.append("  🚨 差值异常（持有量 > 应有总量，疑似异常修改存档，需人工复核）：")
             recs = sorted(res['abnormal'], key=lambda r: -r.get('excess_value', 0))
             shown, omitted = ReportRenderer._capped(recs)
             for rec in shown:
                 lv = f" Lv{rec['level']}" if rec.get('level') else ""
                 price = rec.get('excess_price', rec.get('price'))
                 pay = rec.get('pay') or 0
-                should = rec.get('explainable', pay)
+                should = rec.get('explainable') or 0
+                adjust = rec.get('adjust') or 0
                 excess = rec.get('excess', 0)
                 value = rec.get('excess_value', 0)
                 name_cn = rec['cn'] or rec['name']
@@ -1188,11 +1256,12 @@ class ReportRenderer:
                                 f"（{rec['count']}×{rec['level1_equiv']}）")
                 else:
                     held_txt = str(rec['count'])
-                # 应有总量 = 付费 + 券购 + 塔领
+                # 应有总量 = 付费 + 券购 + 塔领 + 活动修正
                 parts_of = " + ".join(b for b in (
                     f"付费 {pay}" if pay else "",
                     f"券购 {rec['ticket_buy']}" if rec.get('ticket_buy') else "",
                     f"塔领 {rec['tower_claimed']}" if rec.get('tower_claimed') else "",
+                    f"活动 {adjust}" if adjust else "",
                 ) if b)
                 lines.append(
                     f"      - [{ASSET_KIND_CN[rec['kind']]}] {name_cn}{lv} "
@@ -1201,9 +1270,9 @@ class ReportRenderer:
                     + f" > 应有 {should}"
                     + (f"（{parts_of}）" if parts_of
                        else ("（无购买记录）" if not should else ""))
-                    + f" = 超额 {excess} 份"
-                    + (f"，单价 {price}金，共计 {value} 金"
-                       if price is not None else "（未定价）"))
+                    + f" = 差值 {excess} 份"
+                    + (f"，单价 {price}金，差值估值 {value} 金"
+                       if price is not None else "（未定价，仅报数量）"))
             if omitted:
                 lines.append(f"      …另 {omitted} 项（详见异常详情文件）")
         unmatched = res.get('unmatched') or []
@@ -1331,7 +1400,7 @@ class ReportRenderer:
     @staticmethod
     def _asset_item_line(rec):
         """单条资产明细文本：名称、标记、等级、数量、单价、小计、免费额度、
-        超额情况、来源、获取时间、付费对照。"""
+        差值情况、来源、获取时间、付费对照。"""
         name = rec['cn'] or rec['name']
         lv = f" Lv{rec['level']}" if rec.get('level') else ""
         price = rec.get('price')
@@ -1352,41 +1421,46 @@ class ReportRenderer:
             bits.append(f"单价 {price}金" if price is not None else "未定价")
             if price is not None:
                 bits.append(f"小计 {price * rec['count']}")
-        # 超额信息：**实际持有 > 应有总量**（付费+券购+塔领）才标注
+        # 差值信息：**实际持有 > 应有总量**（免费额度+付费+券购+塔领+活动）才标注
         # （稀有时装已单列「稀有时装」区块，不在明细行重复标注）
         if not is_rare_fash and rec.get('excess') and rec['excess'] > 0:
-            should = rec.get('explainable', rec.get('pay') or 0)
-            # 零件：超额是按 baseLabel 全族折算出来的，需标明「全族当量」
+            should = rec.get('explainable')
+            if should is None:
+                should = (rec.get('quota') or 0) + (rec.get('pay') or 0)
+            # 零件：差值是按 baseLabel 全族折算出来的，需标明「全族当量」
             equiv = rec.get('held_equiv')
             if equiv is not None and rec.get('family'):
                 detail = " + ".join(f"Lv{lv0}×{cnt}" + (f"×{eq}" if eq > 1 else "")
                                     for _cn, lv0, cnt, eq in rec['family'])
                 bits.append(f"⚠️全族折算 {equiv}（{detail}）"
-                            f" > 应有 {should}，超额 {rec['excess']} 份"
+                            f" > 应有 {should}，差值 {rec['excess']} 份"
                             + (f"（{rec.get('excess_value')}金）"
-                               if rec.get('excess_value') else "（未定价）"))
+                               if rec.get('excess_value') else "（未定价，仅报数量）"))
             else:
                 lv_eq = rec.get('level1_equiv') or 1
                 eq_txt = f"（{rec['count']}×{lv_eq}={rec.get('held_equiv', rec['count'])}）" \
                     if lv_eq > 1 else ""
                 bits.append(f"⚠️持有 {rec['count']}{eq_txt}"
-                            f" > 应有 {should}，超额 {rec['excess']} 份"
+                            f" > 应有 {should}，差值 {rec['excess']} 份"
                             + (f"（{rec.get('excess_value')}金）"
-                               if rec.get('excess_value') else "（未定价）"))
-        # 附带展示券购/塔领来源（仅供参考）
-        elif not is_rare_fash and (rec.get('ticket_buy') or rec.get('tower_claimed')):
-            # 显示存档中的**实际**获取记录（券购 / 塔领），不叠加理论额度
+                               if rec.get('excess_value') else "（未定价，仅报数量）"))
+        # 附带展示券购 / 塔领 / 活动修正来源（仅供参考）
+        elif not is_rare_fash and (rec.get('ticket_buy') or rec.get('tower_claimed')
+                                   or rec.get('adjust')):
+            # 显示存档中的**实际**获取记录（券购 / 塔领）与人工登记的活动修正
             got = []
             if rec.get('ticket_buy'):
                 got.append(f"券购 {rec['ticket_buy']}")
             if rec.get('tower_claimed'):
                 got.append(f"塔领 {rec['tower_claimed']}")
+            if rec.get('adjust'):
+                got.append(f"活动 {rec['adjust']}")
             bits.append(" + ".join(got))
-        # 同族多阶（升级链）：在**每个**阶上都提示全族持有与总超额，
-        # 避免只看单阶时误以为「只有 1 个却报超额」
+        # 同族多阶（升级链）：在**每个**阶上都提示全族持有与总差值，
+        # 避免只看单阶时误以为「只有 1 个却报差值」
         elif not is_rare_fash and rec.get('family_excess'):
             bits.append(f"⚠️同族共 {rec.get('family_equiv')} 个一阶当量，"
-                        f"全族超额 {rec['family_excess']} 份")
+                        f"全族差值 {rec['family_excess']} 份")
         src = []
         if rec.get(ASSET_SOURCE_MAIN):
             src.append(f"主{rec[ASSET_SOURCE_MAIN]}")
@@ -1695,10 +1769,11 @@ class AssetCollector:
                 partsBag（零件背包）、arms / armsBag / armsHouse（武器上镶嵌的零件）
       • 队友存档：more / moreBag 内每名队友的 SAVE 子存档（同样结构）
 
-    异常判定：超额 = 持有量 − 免费额度(inputdata/free_quota.ini) − 付费次数，
-              超额 > 0 才判为异常（不再有“差值阈值”这类人工参数）。
-              其中：免费时装不限额（豁免）；稀有时装额度固定为 0（持有即报）；
-                    载具由收费/稀有/免费/异常分类覆盖，不参与限额判定。
+    差值判定（★ 本检测的核心，价值仅作参考）：
+        差值 = 持有量 − 应有总量；应有总量 = 免费额度(free_quota.ini) + 付费次数。
+        差值 > 0 才判为异常（不存在“差值阈值”这类人工参数）。
+        其中：免费时装不存在差值（豁免）；稀有时装单列区块（持有即列出）；
+              载具由收费/稀有/免费/异常分类覆盖，不参与本差额判定。
 
     零件分类（objType，权威定义见文件头 PARTS_NORMAL_NAMES 注释）：
       普通零件（bullet/shooter/capacity/loader/stabler/sight）、
@@ -1726,7 +1801,7 @@ class AssetCollector:
         self.pay_totals = {}       # {kind: {名称: 付费次数}}（购买记录，供缺口反查）
         # 判定阈值统一来自 inputdata/free_quota.ini 的免费额度，
         # 不再有“持有vs付费差值阈值”这类人工参数。
-        # 超额价值达到该值才判为异常（0 = 只要有超额就报）；
+        # 差值价值达到该值才判为异常（0 = 只要有差值就报）；
         # 取值来自 free_quota.ini 的 [default] min_excess_value。
         try:
             self.abnormal_min_value = max(
@@ -2047,7 +2122,7 @@ class AssetCollector:
                         rec['tag'] = tag
                         rec['base'] = base
                         # 载具合法性由专属区块覆盖（收费/稀有/免费/异常），
-                        # 且图鉴内载具本身可免费获得 → 整体豁免超额判定，避免误报
+                        # 且图鉴内载具本身可免费获得 → 整体豁免差值判定，避免误报
                         rec['no_excess'] = True
                     price = None
                     if not rec['is_chip']:
@@ -2079,7 +2154,7 @@ class AssetCollector:
                         rec['pay'] = None
                         continue
                     # 购买记录对照：未购买过（对照表有价但 pay 无记录）的物品，
-                    # 会在判定阶段按「未购买但存档内拥有」处理。
+                    # 会在判定阶段按「持有量 > 应有总量（差值）」处理。
                     pay_cnt = pay_totals[kind].get(key)
                     if pay_cnt is None and rec['name']:
                         pay_cnt = pay_totals[kind].get(self.table._norm_name(rec['name']))
@@ -2100,19 +2175,20 @@ class AssetCollector:
 
     # ---- 汇总 ----
     def summary(self):
-        """返回各分类的汇总：总件数、可计价件数、价值、以及统一的超额异常项。
+        """返回各分类的汇总：总件数、可计价件数、参考估值、以及统一口径的差值异常项。
 
-        统一判定口径（取代旧「单价/次数/持有vs付费」三套独立阈值）：
-            免费额度 = free_quota_of(kind, cn, en)      # 来自 inputdata/free_quota.ini
-            超额数量 = max(0, 持有量 − 免费额度 − 付费次数)
-            超额价值 = 单价 × 超额数量        （单价未知时按 0 计，仅报数量）
-        超额数量 > 0 且（单价未知 或 超额价值 ≥ abnormal_min_value）→ 判为异常。
+        ★ 本检测的重点是「差值」，不是估值 —— 找出持有量与应有总量对不上的物品
+        （通常意味着存档被异常修改）：
+            应有总量 = 免费额度(free_quota.ini) + 付费次数
+            差值数量 = max(0, 持有量 − 应有总量)
+            差值价值 = 单价 × 差值数量        ← 仅用于排序/展示，不参与判定
+        差价 > 0 且（未定价 或 差值价值 ≥ min_excess_value）→ 报为异常。
 
         稀有零件按 **baseLabel 全族合并** 判定：高阶由低阶升级而来（2 阶吃 4 份一阶），
-        而免费额度是「一阶可获取份数」，故先折算成一阶当量再比较 ——
+        而应有总量是「可获取的一阶份数」，故先折算成一阶当量再比较 ——
         既避免高阶被重复计入额度，也与「升级消耗低阶」的机制一致。
 
-        这样只报一次：既说明“多了多少份”，也说明“值多少黄金”，
+        这样只报一次：既说明“多了多少份”，也说明“大概值多少黄金”，
         不再出现同一物品被高价/高频/持有量三条规则重复命中的情况。
         """
         out = {}
@@ -2132,7 +2208,7 @@ class AssetCollector:
             else:
                 for rec in merged.values():
                     # 稀有时装：已在「稀有时装」区块单列（含获取时间），
-                    # 不参与超额判定 —— 否则会被判成「额度 0 → 持有即超额」而重复报告
+                    # 不参与差值判定 —— 否则会被判成「额度 0 → 持有即差值」而重复报告
                     if rec.get('tag') == 'rare' and rec.get('is_fashion'):
                         rec['quota'] = 0
                         continue
@@ -2143,35 +2219,46 @@ class AssetCollector:
         return out
 
     def _balloon_item(self, kind, rec, abnormal):
-        """单个物品的「持有量 ↔ 购买记录」判定（时装；载具走 no_excess 分支）。
+        """单个物品的「持有量 ↔ 应有总量」差值判定（时装；载具走 no_excess 分支）。
 
-        ★ 判定口径（购买记录与存档数据双向比对）：
-          • 正常匹配（购买记录 ≥ 持有量）→ **不输出**；
-          • 未购买但存档内拥有（持有量 > 购买记录，含完全无购买记录）→ 输出。
+        ★ 差值口径（本检测的核心，不是估值）：
+              应有总量 = 免费额度(free_quota.ini) + 付费次数(pay.obj)
+              差值     = 持有量 − 应有总量
+          • 差值 ≤ 0（来源说得清）→ **不输出**；
+          • 差值 > 0（含既无免费额度、也无购买记录）→ 输出，交人工复核。
+        价值只随差值附带展示（多出来多少、值多少），不参与是否异常的判断。
         """
         if rec.get('no_excess'):
-            # 免费时装 / 免费载具：本身可无限免费获取，不做限额判定
+            # 免费时装 / 免费载具：本身可无限免费获取，不存在差值
             rec['quota'] = 0
             return
-        rec['quota'] = 0
-        rec['quota_explicit'] = False
+        cn, en = rec.get('cn'), rec.get('name')
+        quota = free_quota_of(kind, cn, en)
+        rec['quota_explicit'] = free_quota_entry(kind, cn, en) is not None
         price = rec.get('price')
         paid_part = rec.get('pay') or 0
-        # 购买记录总量（时装只有购买渠道），供报告统一显示
-        rec['explainable'] = paid_part
-        if not MATCH_PURCHASE_RECORDS and paid_part <= 0:
-            return              # 旧口径：无购买记录 → 无参照，不判定
-        if rec['count'] <= paid_part:
-            return              # 正常匹配 → 不输出
-        excess = rec['count'] - paid_part
+        if quota == FREE_QUOTA_UNLIMITED:
+            # 配置里登记为「不限」（可无限免费获取）→ 不存在差值
+            rec['quota'] = FREE_QUOTA_UNLIMITED
+            rec['explainable'] = None
+            return
+        rec['quota'] = quota
+        # 应有总量 = 免费额度 + 付费次数，供报告统一显示
+        should_have = quota + paid_part
+        rec['explainable'] = should_have
+        if not MATCH_PURCHASE_RECORDS and should_have <= 0:
+            return              # 旧口径：既无免费额度也无购买记录 → 无参照，不判定
+        if rec['count'] <= should_have:
+            return              # 来源说得清 → 不输出
+        excess = rec['count'] - should_have
         rec['excess'] = excess
         rec['excess_value'] = (price or 0) * excess
-        rec['no_record'] = paid_part <= 0
+        rec['no_record'] = should_have <= 0
         if price is None or rec['excess_value'] >= self.abnormal_min_value:
             abnormal.append(rec)
 
     def _balloon_parts(self, merged, abnormal):
-        """稀有零件判定：**把高级折算成低级后统计**，实际总量 > 应有总量才报错。
+        """稀有零件差值判定：**把高级折算成低级后统计**，实际当量 > 应有总量即报。
 
         折算规则（权威：AS3 ThingsDefine.getComposeMustNum / PartsRare）：
             高级零件由低级升级而来（升阶会吃掉 3~4 份低级），
@@ -2179,11 +2266,13 @@ class AssetCollector:
                 一阶当量 = Σ(该阶持有量 × 升到该阶的累计消耗)
             等价于：把高级零件"拆解"回低级材料后，看总共需要多少低级零件。
 
-        应有总量（可解释上限，取自存档实际数据）：
-            付费次数(pay) + 券购次数(goods._p) + 已领塔奖励(tower)
+        应有总量 = 付费次数(pay) + 券购次数(goods._p) + 已领塔奖励(tower)
+                   + 活动修正（free_quota.ini 的 [parts_adjust]：活动/兑换/赠送等
+                     存档内查不到记录的来源，按零件人工登记 —— 即“活动”的修正参数）
 
-        判定：`实际一阶当量 > 应有总量` → 报错。
+        判定：`实际一阶当量 > 应有总量` → 差值异常（疑似异常改档）。
         不再报「实际 < 应有」（元素球等被当作合成材料消耗是正常现象）。
+        价值只随差值附带展示，不参与判定。
         """
         families = {}
         for key, rec in merged.items():
@@ -2210,10 +2299,17 @@ class AssetCollector:
                                   and self.table._norm_name(k[:-2]) == base)
             # 虚天塔已领取的该零件奖励（一次性，不随周重置）
             tower_part = (self.tower_claimed or {}).get(base, 0)
+            # ★ 活动修正（free_quota.ini 的 [parts_adjust]）：活动/兑换/赠送等
+            #   存档内查不到记录的来源，无法自动统计，只能按零件人工登记。
+            adjust_part = free_quota_entry(ASSET_PARTS_ADJUST,
+                                           PARTS_BASE_TO_CN.get(base, ''), base)
+            no_limit = adjust_part == FREE_QUOTA_UNLIMITED
+            adjust_part = 0 if (adjust_part is None or no_limit) else adjust_part
             for r in recs:
-                r['quota'] = 0
+                r['quota'] = adjust_part
                 r['ticket_buy'] = ticket_part
                 r['tower_claimed'] = tower_part
+                r['adjust'] = adjust_part
                 r['pay'] = paid_part or None
 
             # ★ 把高级折算成低级：各阶 × 升到该阶的累计消耗，求和得"实际一阶当量"
@@ -2233,12 +2329,17 @@ class AssetCollector:
             if price is None:
                 price = rep.get('price')
 
-            # 应有总量 = 付费 + 券购 + 塔领（全部取自存档实际数据）
-            should_have = paid_part + ticket_part + tower_part
+            # 应有总量 = 付费 + 券购 + 塔领（存档实际记录） + 活动修正（人工登记）
+            should_have = paid_part + ticket_part + tower_part + adjust_part
             rep['explainable'] = should_have
             for r in recs:
                 r['explainable'] = should_have
-            # 无任何来源记录 → 无参照，不判定（合成/掉落所得查不到记录）
+            # 登记为「不限」→ 无法判定差值，跳过
+            if no_limit:
+                for r in recs:
+                    r['explainable'] = None
+                continue
+            # 无任何来源记录 → 无参照，不判定（可在 [parts_adjust] 登记活动所得）
             if should_have <= 0:
                 continue
             # ★ 实际（折算后）> 应有 → 报错
@@ -2247,7 +2348,7 @@ class AssetCollector:
                 rep['excess'] = excess
                 rep['excess_value'] = (price or 0) * excess
                 rep['excess_price'] = price
-                # 全族共享上下文：明细行里每个阶都能看到「同族共多少、超额多少」
+                # 全族共享上下文：明细行里每个阶都能看到「同族共多少、差值多少」
                 for r in recs:
                     r['family_equiv'] = held_equiv
                     r['family_excess'] = excess
@@ -2354,7 +2455,7 @@ class AssetCollector:
                     # 免费标记：任一侧识别为免费时装即继承（主/队友存档可能只有一方持有）
                     if rec.get('free') or is_free_fashion(rec['cn'], rec['name']):
                         target['free'] = True
-                    # 豁免超额：免费时装 / 免费载具（任一来源识别即继承）
+                    # 豁免差值：免费时装 / 免费载具（任一来源识别即继承）
                     if rec.get('no_excess'):
                         target['no_excess'] = True
                     # 固定额度（稀有时装 = 0）同样需继承
@@ -2873,10 +2974,11 @@ class DetectionEngine:
     @staticmethod
     def check_asset_nodes(file_path, goods_csv=None, max_details=0,
                           abnormal_min_value=None):
-        """资产检测：时装 / 载具 / 特殊零件 的持有量、价值及与 pay 付费次数对照。
+        """资产检测：时装 / 载具 / 特殊零件 的**差值检测**（重点非估值）。
 
+        差值 = 持有量 − 应有总量（免费额度 + 付费 + 券购 + 塔领 + 活动修正）；
+        差值 > 0 即报异常（疑似异常修改存档）；估值仅作附带参考。
         max_details 控制明细输出条数（0 = 不限），复用界面“明细最大条数”设置。
-        判定阈值统一来自 inputdata/free_quota.ini 的免费额度，无额外差值阈值。
         返回 dict: {title,status,msg,summary,kinds,abnormal,unmatched,asset_dict}
           • summary 为单行文本摘要（供 CSV/日志）
           • kinds 为分类明细（供渲染层）
@@ -2937,8 +3039,8 @@ class DetectionEngine:
         missing_purchases = (collector.find_missing_purchases(summary)
                              if MATCH_PURCHASE_RECORDS else [])
 
-        # 状态判定：出现「未购买但存档内拥有」（over / 未匹配收费载具）或
-        # 异常载具（不在载具列表内）时判 fail；仅有「购买了但存档内无」判 warn。
+        # 状态判定：出现「差值 > 0」（over / 未匹配收费载具）或异常载具
+        # （不在载具列表内）时判 fail；仅有「购买了但存档内无」判 warn。
         if over or paid_vehicles or unknown_vehicles:
             status = 'fail'
         elif missing_purchases:
@@ -2961,7 +3063,7 @@ class DetectionEngine:
         total_count = (summary[ASSET_FASHION]['total']
                        + summary[ASSET_PARTS]['total'] + veh_count)
         parts_kinds = len(summary[ASSET_PARTS]['items'])
-        msg_head = (f"💰 资产总值：{total_value} 黄金 | 共 {total_count} 件"
+        msg_head = (f"△ 差值异常 {len(over)} 项 | 参考估值 {total_value} 黄金 | 共 {total_count} 件"
                     f"（时装 {summary[ASSET_FASHION]['total']}、"
                     f"载具 {veh_count}、"
                     f"特殊零件 {summary[ASSET_PARTS]['total']}/{parts_kinds}种）")
@@ -2971,9 +3073,9 @@ class DetectionEngine:
                       if summary[k]['total']]
         if veh_count:
             brief_bits.append(f"载具 {veh_count}件")
-        brief_bits.append(f"价值 {total_value} 金")
+        brief_bits.append(f"估值 {total_value} 金")
         if over:
-            brief_bits.append(f"超额 {len(over)} 项")
+            brief_bits.append(f"差值 {len(over)} 项")
         if paid_vehicles:
             brief_bits.append(f"收费载具未匹配 {len(paid_vehicles)} 种")
         if missing_purchases:
@@ -3030,12 +3132,13 @@ class DetectionEngine:
                 [f"[{ASSET_KIND_CN[r['kind']]}] {r['cn'] or r['name']} "
                  + (f"折算{r.get('held_equiv', r['count'])}"
                     if r['kind'] == ASSET_PARTS else f"持有{r['count']}")
-                 + f" > 应有{r.get('explainable', r.get('pay') or 0)}"
-                 f"（付费{r.get('pay') or 0}"
+                 + f" > 应有{r.get('explainable') or 0}"
+                 f"（免费{r.get('quota') or 0}+付费{r.get('pay') or 0}"
                  + (f"+券购{r['ticket_buy']}" if r.get('ticket_buy') else "")
                  + (f"+塔领{r['tower_claimed']}" if r.get('tower_claimed') else "")
-                 + f"）超额{r.get('excess', 0)}份"
-                 + (f"，价值{r.get('excess_value', 0)}金"
+                 + (f"+活动{r['adjust']}" if r.get('adjust') else "")
+                 + f"）差值{r.get('excess', 0)}份"
+                 + (f"，差值估值{r.get('excess_value', 0)}金"
                     if r.get('excess_value') else "，未定价")
                  for r in over[:6]]
                 + ([f"收费载具未匹配 {len(paid_vehicles)} 种（{('、'.join(r['cn'] or r['name'] for r in paid_vehicles[:4]))}）"]
@@ -3329,7 +3432,7 @@ class AppDetector:
             # 兼容旧版 temp_dir → work_dir
             if 'work_dir' not in self.config['Settings'] and 'temp_dir' in self.config['Settings']:
                 self.config['Settings']['work_dir'] = self.config['Settings'].get('temp_dir', TEST_DIR)
-            # 旧版「资产差值阈值」已被 inputdata/free_quota.ini 的免费额度取代，去掉残留键
+            # 旧版「资产差值阈值」已被 free_quota.ini 的免费额度与差值口径取代，去掉残留键
             self.config['Settings'].pop('asset_min_delta', None)
         except Exception as e:
             print(f"警告：读取配置文件异常: {e}")
@@ -3778,13 +3881,13 @@ class AppDetector:
         tk.Label(card, text="批量检测线程:", bg="#FFFFFF", font=("Microsoft YaHei", 11)).place(x=350, y=y)
         self.entry_thread_count = make_param_entry(500, y, 'batch_thread_count', 5)
 
-        # 第三行：免费额度配置（判定阈值统一来自该文件，不再有差值阈值参数）
+        # 第三行：免费额度 / 活动修正配置（差值判定的应有总量来自该文件）
         y += 35
         tk.Label(card, text="免费额度配置:", bg="#FFFFFF", font=("Microsoft YaHei", 11)).place(x=50, y=y)
         tk.Button(card, text="📝 打开 free_quota.ini", command=self._open_free_quota_ini,
                   bg="#005159", fg="white", font=("Microsoft YaHei", 10), bd=0
                   ).place(x=200, y=y + 2, width=200, height=30)
-        tk.Label(card, text="（判定：持有量 − 免费额度 − 付费次数 = 超额，超出即异常）",
+        tk.Label(card, text="（★ 差值判定：持有量 − 应有总量，超过即异常；与估值无关）",
                  bg="#FFFFFF", font=("Microsoft YaHei", 10), fg="#666666").place(x=415, y=y + 10)
 
         # 第四行：提示
@@ -3985,8 +4088,8 @@ class AppDetector:
         union_res = DetectionEngine.check_vip_pay_union(file_path, cost_for_union)
         results.append(union_res)
 
-        # 6. 资产检测（时装 / 载具 / 特殊零件）
-        #    判定阈值来自 free_quota.ini 的免费额度，无额外差值参数
+        # 6. 资产检测（时装 / 载具 / 特殊零件）★ 重点：差值（持有量 vs 应有总量）
+        #    应有总量与活动修正参数均来自 free_quota.ini
         asset_res = DetectionEngine.check_asset_nodes(file_path, max_details=max_details)
         results.append(asset_res)
         extra['asset_res'] = asset_res
@@ -4382,10 +4485,10 @@ class AppDetector:
         uid_rows = self._build_uid_groups(file_result_map, uid_max_vip, uid_assets,
                                           max_details)
 
-        # 资产异常单独汇总一行，便于在运行日志里快速看到「谁持有量对不上」
+        # 资产差值单独汇总一行，便于在运行日志里快速看到「谁持有量对不上」
         asset_issue_uids = [r['uid'] for r in uid_rows if r.get('has_asset_issue')]
         if asset_issue_uids:
-            self.log(f"💎 资产异常（超额）账号 {len(asset_issue_uids)} 个："
+            self.log(f"💎 资产差值异常账号 {len(asset_issue_uids)} 个："
                      + "、".join(asset_issue_uids[:10])
                      + ("…" if len(asset_issue_uids) > 10 else ""), "FAIL")
 
@@ -4408,7 +4511,7 @@ class AppDetector:
         只为报告展示：
           • 数量/价值取该账号各存档的**最大值**（同一账号多个存档是同一份资产的不同
             时间快照，相加会重复计数）；
-          • 异常项按 (类别, 物品) 去重，保留超额价值最大的一条。
+          • 差值项按 (类别, 物品) 去重，保留差值（当量）最大的一条。
 
         返回 {uid: {fashion_text, vehicle_text, parts_text, value, reason,
                     abnormal, paid_vehicles, rare_vehicles, rare_fashions}}。
@@ -4425,7 +4528,7 @@ class AppDetector:
                 'kinds': {k: {'count': 0, 'value': 0} for k in
                           (ASSET_FASHION, ASSET_VEHICLE, ASSET_PARTS)},
                 'unmatched': set(),
-                'over': {},      # (kind, key) -> rec（未购买但存档内拥有）
+                'over': {},      # (kind, key) -> rec（差值 > 0，需人工复核）
                 'missing': {},   # (kind, key) -> rec（购买了但存档内无）
                 'paid': {},      # 名称 -> rec（收费载具）
                 'rare': {},      # 名称 -> rec（稀有载具）
@@ -4457,7 +4560,7 @@ class AppDetector:
             for rec in (asset.get('abnormal') or []):
                 key = (rec.get('kind'), rec.get('name') or rec.get('cn'))
                 prev = entry['over'].get(key)
-                # 同一物品在不同存档中取超额价值最大的快照（价值为 0 时比数量）
+                # 同一物品在不同存档中取差值最大的快照（价值为 0 时比数量）
                 if prev is None or ((rec.get('excess_value', 0), rec.get('excess', 0))
                                     > (prev.get('excess_value', 0), prev.get('excess', 0))):
                     entry['over'][key] = rec
@@ -4495,12 +4598,27 @@ class AppDetector:
             over_list = sorted(entry['over'].values(),
                                key=lambda r: (-r.get('excess_value', 0),
                                               -r.get('excess', 0)))
-            over_txt = "；".join(
-                f"[{ASSET_KIND_CN[r['kind']]}] {r['cn'] or r['name']} "
-                f"持有{r['count']}−免费{r.get('quota', 0)}−付费{r.get('pay') or 0}"
-                f"=超额{r.get('excess', 0)}"
-                + (f"（{r.get('excess_value')}金）" if r.get('excess_value') else "")
-                for r in over_list[:6])
+            # 差值摘要：零件与单件时装展示口径不同（零件按全族当量）
+            def _over_txt(r):
+                head = f"[{ASSET_KIND_CN[r['kind']]}] {r['cn'] or r['name']} "
+                if r['kind'] == ASSET_PARTS:
+                    head += (f"折算当量{r.get('held_equiv', r['count'])}"
+                             f"−应有{r.get('explainable') or 0}")
+                    detail = " + ".join(b for b in (
+                        f"付费{r.get('pay') or 0}" if r.get('pay') else "",
+                        f"券购{r['ticket_buy']}" if r.get('ticket_buy') else "",
+                        f"塔领{r['tower_claimed']}" if r.get('tower_claimed') else "",
+                        f"活动{r['adjust']}" if r.get('adjust') else "",
+                    ) if b)
+                    if detail:
+                        head += f"（{detail}）"
+                else:
+                    head += (f"持有{r['count']}−免费{r.get('quota') or 0}"
+                             f"−付费{r.get('pay') or 0}")
+                return (head + f"=差值{r.get('excess', 0)}份"
+                        + (f"（{r.get('excess_value')}金）"
+                           if r.get('excess_value') else "（未定价）"))
+            over_txt = "；".join(_over_txt(r) for r in over_list[:6])
             paid_list = sorted(entry['paid'].values(),
                                key=lambda r: (-r.get('count', 0), r.get('cn') or ''))
             missing_list = sorted(entry['missing'].values(),
@@ -4710,9 +4828,10 @@ class AppDetector:
         messagebox.showinfo("完成", "已恢复默认设置")
 
     def _open_free_quota_ini(self):
-        """打开免费额度配置 free_quota.ini（缺失时按内置默认值生成）。
+        """打开配置 free_quota.ini（缺失时按内置默认值生成）。
 
-        资产异常判定口径即本文件：超额 = 持有量 − 免费额度 − 付费次数。
+        差值判定口径即本文件：差值 = 持有量 −（应有总量）；
+        时装：免费额度 + 付费；零件：付费 + 券购 + 塔领 + 活动修正 [parts_adjust]。
         """
         path = ensure_free_quota_ini()
         try:
