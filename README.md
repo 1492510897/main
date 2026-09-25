@@ -100,7 +100,8 @@ detect.has_gui(), detect.has_crypto()   # 运行环境能力探测
 ```
 差值 = 持有量 − 应有总量
 应有总量 = 付费次数(pay.obj) + 免费额度(free_quota.ini)
-稀有零件：应有 = 付费 + 券购(goods._p) + 塔领(tower) + 活动修正([parts_adjust])
+稀有零件：应有 = 付费 + 券购(goods._p) + 合成(gift.caO) + 塔领(tower)
+                + 已领等级礼包(levelGiftObj) + 活动修正([parts_adjust])
 ```
 
 - 差值只与**数量**有关，与单价/估值无关 → 未定价物品同样会报。

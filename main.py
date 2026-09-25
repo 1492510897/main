@@ -19,9 +19,9 @@ main (γ 合并版) v3.1.0 —— 数据检测工具（军队/公会成员存档
                        （差值 > 0 = 来源说不清，疑似异常修改存档，交人工复核）：
                          差值 = 持有量 − 应有总量
                          应有总量 = 付费次数 + 免费额度（活动/掉落/赠送等）
-                         稀有零件：应有 = 付费 + 券购 + 塔领 + 已领等级礼包 + 活动修正
-                         （三种「芯」直接按版本上限判：暗金 1 / 紫金 2 / 氩金 1，
-                           见 PARTS_VERSION_LIMIT 与 LEVEL_GIFT_PARTS）
+                         稀有零件：应有 = 付费 + 券购 + 合成 + 塔领 + 已领等级礼包 + 活动修正
+                         （合成次数取 gift.caO.saveObj；三种「芯」直接按版本上限判：
+                           暗金 1 / 紫金 2 / 氩金 1，见 PARTS_VERSION_LIMIT 与 LEVEL_GIFT_PARTS）
                        付费载具 / 付费时装与购买记录(pay.obj)双向比对：
                          「未购买但存档内拥有」与「购买了但存档内无」会输出，
                          能正常匹配（购买记录 ≥ 持有量）的不输出
@@ -440,6 +440,31 @@ def buy_num_of(buy_map, base):
         if not str(key).endswith('_p'):
             continue
         if parts_base_label(key) == base:
+            total += num
+    return total
+
+
+def compose_num_of(compose_map, base):
+    """从 gift.caO.saveObj 取该零件族的**合成累计次数**。
+
+    键为合成产物名（`<baseLabel>_1`，如 poisonParts_1 / purgoldCpu_1）；
+    少数产物无等级后缀（如 intensDrug）。按 baseLabel 归一后汇总所有匹配项 ——
+    合成产物是**累计**次数（不随周重置，权威见 GiftSave.caO / GiftData.composeEvent），
+    与「本周次数」cwObj 不同。
+
+    仅接受 `<base>` 与 `<base>_N` 两种写法（零件的合成产物恒为 `<baseLabel>_1`）。
+    不做「按归一化名相等」的宽松匹配 —— 否则名称恰好同前缀的**非零件**产物
+    （如 intensDrug 与 intensDrugXxx）会被误算进零件额度。
+    """
+    base = (base or '').strip()
+    if not base or not compose_map:
+        return 0
+    direct = compose_map.get(base)
+    if direct:
+        return direct
+    total = 0
+    for key, num in compose_map.items():
+        if re.fullmatch(re.escape(base) + r'_\d+', str(key)):
             total += num
     return total
 
@@ -1602,7 +1627,7 @@ class ReportRenderer:
                                 f"（{rec['count']}×{rec['level1_equiv']}）")
                 else:
                     held_txt = str(rec['count'])
-                # 应有总量 = 付费 + 券购 + 塔领 + 礼包 + 活动修正
+                # 应有总量 = 付费 + 券购 + 合成 + 塔领 + 礼包 + 活动修正
                 # 特例：登记了版本上限的族（三种「芯」）改为直接报上限
                 if rec.get('version_limit'):
                     parts_of = f"版本上限 {rec['version_limit']}"
@@ -1610,6 +1635,7 @@ class ReportRenderer:
                     parts_of = " + ".join(b for b in (
                         f"付费 {pay}" if pay else "",
                         f"券购 {rec['ticket_buy']}" if rec.get('ticket_buy') else "",
+                        f"合成 {rec['compose_num']}" if rec.get('compose_num') else "",
                         f"塔领 {rec['tower_claimed']}" if rec.get('tower_claimed') else "",
                         f"礼包 {rec['gift_claimed']}" if rec.get('gift_claimed') else "",
                         f"活动 {adjust}" if adjust else "",
@@ -1853,12 +1879,15 @@ class ReportRenderer:
                             + (f"（{rec.get('excess_value')}金）"
                                if rec.get('excess_value') else "（未定价，仅报数量）"))
         # 附带展示券购 / 塔领 / 活动修正来源（仅供参考）
-        elif not is_rare_fash and (rec.get('ticket_buy') or rec.get('tower_claimed')
+        elif not is_rare_fash and (rec.get('ticket_buy') or rec.get('compose_num')
+                                   or rec.get('tower_claimed')
                                    or rec.get('adjust')):
-            # 显示存档中的**实际**获取记录（券购 / 塔领）与人工登记的活动修正
+            # 显示存档中的**实际**获取记录（券购 / 合成 / 塔领）与人工登记的活动修正
             got = []
             if rec.get('ticket_buy'):
                 got.append(f"券购 {rec['ticket_buy']}")
+            if rec.get('compose_num'):
+                got.append(f"合成 {rec['compose_num']}")
             if rec.get('tower_claimed'):
                 got.append(f"塔领 {rec['tower_claimed']}")
             if rec.get('adjust'):
@@ -2466,6 +2495,7 @@ class AssetCollector:
         self.warnings = []        # 异常/提示行
         # 存档内其它数据源（collect() 时填充）
         self.goods_buy = {}       # goods.buyNumObj: {标签: 购买次数}
+        self.compose_all = {}     # gift.caO.saveObj: {物品键: 合成累计次数}
         self.tower = {}           # tower.gO.saveObj: {层: 通关难度}
         self.tower_claimed = {}    # {baseLabel: 已领取的塔层奖励份数}
         self.level_gift_claimed = set()   # 已领取的等级礼包键（如 dgcpu1，见 LEVEL_GIFT_PARTS）
@@ -2712,6 +2742,39 @@ class AssetCollector:
                 out.add(name)
         return out
 
+    @staticmethod
+    def _load_compose_all(save_node):
+        """读取 gift.caO.saveObj：**物品合成累计次数** {物品键: 次数}。
+
+        权威（dataAll/gift/GiftData.as + save/GiftSave.as）：
+            caO   = 合成**累计**次数（getComposeAllNum），不随周重置
+            cwObj = 合成**本周**次数（getComposeWeekNum），newWeek() 会 clearData()
+        写入处 composeEvent()：`cwObj.addAttribute`（d0.week>0）+ `caO.addAttribute`（d0.all>0）。
+
+        键为 `thingsComposeClass` 里的产物名（存档实测仅 7 种），其中 5 种是
+        稀有零件（一阶）：poisonParts_1 生化球 / followParts_1 跟踪器 /
+        oldBulletCube_1 老弹体 / purgoldCpu_1 紫金之芯 / betrayParts_1 叛变器
+        —— 正是「活动修正 [parts_adjust] 里需人工登记」的合成渠道，
+        现改为从存档自动读取，不必再猜。
+        """
+        out = {}
+        node = save_node.find('s[@name="gift"]/s[@name="caO"]/s[@name="saveObj"]')
+        if node is None:
+            return out
+        for c in node:
+            name = c.get('name')
+            if not name:
+                continue
+            num = decode_text32_number(c.text, None)
+            if num is None:
+                try:
+                    num = int(float((c.text or '').strip()))
+                except (TypeError, ValueError):
+                    num = None
+            if num:
+                out[name] = num
+        return out
+
     def _load_tower(self, save_node):
         """读取 tower.gO.saveObj：{层号: 该层已通关的最高难度(0~4)}。
 
@@ -2839,10 +2902,12 @@ class AssetCollector:
         #    pay.obj        : 黄金购买的 propId 次数（付费）
         #    goods.buyNumObj: 各渠道购买次数（_p = 零件券商店，不花黄金）
         #    tower.gO       : 虚天塔通关进度 → 已领取的塔层零件奖励
+        #    gift.caO       : 物品合成**累计**次数（稀有零件的一阶来源之一）
         bought = self._load_pay(save_node)
         pay_totals = self._pay_totals(bought)
         self.pay_totals = pay_totals      # 供「购买了但存档内无」反查
         self.goods_buy = self._load_goods_buy(save_node)
+        self.compose_all = self._load_compose_all(save_node)
         self.tower = self._load_tower(save_node)
         self.tower_claimed = self._tower_parts_claimed(self.tower)
         self.level_gift_claimed = self._load_level_gift(save_node)
@@ -3037,8 +3102,8 @@ class AssetCollector:
                 一阶当量 = Σ(该阶持有量 × 升到该阶的累计消耗)
             等价于：把高级零件"拆解"回低级材料后，看总共需要多少低级零件。
 
-        应有总量 = 付费次数(pay) + 券购次数(goods._p) + 已领塔奖励(tower)
-                   + 已领等级礼包(levelGiftObj)
+        应有总量 = 付费次数(pay) + 券购次数(goods._p) + 合成次数(gift.caO)
+                   + 已领塔奖励(tower) + 已领等级礼包(levelGiftObj)
                    + 活动修正（free_quota.ini 的 [parts_adjust]：活动/兑换/赠送等
                      存档内查不到记录的来源，按零件人工登记 —— 即“活动”的修正参数）
         特例：三种「芯」按 PARTS_VERSION_LIMIT 的**版本上限**直接封顶
@@ -3068,6 +3133,10 @@ class AssetCollector:
             # 零件券商店实际购买次数（buyNumObj 键为 "<baseLabel>_1_p"；
             # 按 baseLabel 归一汇总，见 buy_num_of）
             ticket_part = buy_num_of(self.goods_buy, base)
+            # ★ 物品合成累计次数（gift.caO）：稀有零件的一阶来源之一
+            #   （键为 "<baseLabel>_1"，如 poisonParts_1 / purgoldCpu_1；
+            #    非零件的合成项如 intensDrug 不会命中零件族，自然被忽略）
+            compose_part = compose_num_of(self.compose_all, base)
             # 虚天塔已领取的该零件奖励（一次性，不随周重置）
             tower_part = (self.tower_claimed or {}).get(base, 0)
             # ★ 等级礼包（一次性）：该族是否由某个已领取的礼包发放（见 LEVEL_GIFT_PARTS）。
@@ -3088,6 +3157,7 @@ class AssetCollector:
             for r in recs:
                 r['quota'] = adjust_part
                 r['ticket_buy'] = ticket_part
+                r['compose_num'] = compose_part
                 r['tower_claimed'] = tower_part
                 r['gift_claimed'] = gift_part
                 r['version_limit'] = limit_part
@@ -3111,13 +3181,15 @@ class AssetCollector:
             if price is None:
                 price = rep.get('price')
 
-            # 应有总量 = 付费 + 券购 + 塔领 + 已领礼包（存档实际记录） + 活动修正（人工登记）
+            # 应有总量 = 付费 + 券购 + 合成 + 塔领 + 已领礼包（存档实际记录）
+            #            + 活动修正（人工登记）
             # 若该族登记了版本上限（三种「芯」），则以上限为准 —— 上限已涵盖
             # 所有合法渠道（礼包/合成等），不会因漏登记渠道而误报。
             if limit_part is not None:
                 should_have = limit_part
             else:
-                should_have = paid_part + ticket_part + tower_part + gift_part + adjust_part
+                should_have = (paid_part + ticket_part + compose_part
+                               + tower_part + gift_part + adjust_part)
             rep['explainable'] = should_have
             for r in recs:
                 r['explainable'] = should_have
@@ -3564,11 +3636,21 @@ class DetectionEngine:
 
     @staticmethod
     def _vip_snapshot_issue(root, vip_level, vip_node=None):
-        """VIP 二重检测：gift.vv（导入时快照）↔ vip.upLevelObj（当前值）。
+        """VIP 二重检测：gift.vv（导入时快照）↔ 当前 VIP 权限集合。
 
-        游戏导入存档时把 upLevelObj 的首次快照写入 gift.vv，事后用
-        ObjectMethod.samePan 自校验（PlayerSave.getZuobiStr）——两者本应完全
-        一致；改档者通常只改其中一处，因此这是独立于 m 权限越界的第二重证据。
+        游戏导入存档时把 upLevelObj 的首次快照写入 gift.vv，事后做一致性
+        自校验（PlayerSave.getZuobiStr → ObjectMethod.samePan）。
+
+        ★ 比对目标随游戏版本迁移（权威：dataAll/_app/vip/VipSave.as）：
+            · 旧客户端：权限记录在 `upLevelObj`；`VipSave.upLevel()` 也写它。
+            · 新客户端：`upLevel()` **只写 `nO`**，`upLevelObj` 不再维护 ——
+              存档里因此常留一个**空的 upLevelObj**（而 nO/obj 与 vv 一致）。
+              该档 `inData_byObj()` 仅在缺 `nO` 时才从 `upLevelObj` 推导 nO，
+              即 `upLevelObj` 已是被 nO 取代的遗留字段。
+        故判定顺序：优先用 `nO`（现行字段）比对；`nO` 不存在时才回退 `upLevelObj`
+        （老档，缺 nO 时游戏同样是用 upLevelObj 推导的）。
+        实测 4 例「vv 有 9 项 / upLevelObj 空」全部是 nO==obj==vv 的正常档，
+        按 upLevelObj 比对会误报 —— 此即本次修复的 bug。
 
         vip_node 为已定位的 vip 节点（与 m 权限检查同源，避免重复查找取错节点）。
         返回 (state, text)：'skip'=无快照/无法判定、'ok'=一致、'fail'=不一致。
@@ -3612,17 +3694,42 @@ class DetectionEngine:
                    for key, val in snapshot.items()):
             return 'skip', None
 
-        current = {}
-        up_node = (vip_node.find('s[@name="upLevelObj"]')
-                   if vip_node is not None else None)
-        if up_node is not None:
-            for child in up_node:
+        def _keys_of(node):
+            out = {}
+            if node is None:
+                return out
+            for child in node:
                 key = child.get('name') or ''
                 if key.startswith('m') and key[1:].isdigit():
-                    current[key] = (child.text or '').strip().lower() == 'true'
+                    out[key] = (child.text or '').strip().lower() == 'true'
+            return out
 
-        if snapshot == current:
-            return 'ok', f"gift.vv 与 upLevelObj 一致（{len(snapshot)} 项）"
+        up_node = (vip_node.find('s[@name="upLevelObj"]')
+                   if vip_node is not None else None)
+        current = _keys_of(up_node)
+        field, compare = 'upLevelObj', 'eq'
+
+        if not current:
+            # ★ upLevelObj 为空：新版客户端已废弃该字段（不再回写），
+            #   改用现行 nO 校验。nO 只会因合法升级**单调增长**，故这里
+            #   只要求「快照 ⊆ 当前」（快照里的权限不应凭空消失），
+            #   不能用全等 —— 否则玩家后续正常升级都会被误判（实测 549 例）。
+            no_node = (vip_node.find('s[@name="nO"]')
+                       if vip_node is not None else None)
+            current = _keys_of(no_node)
+            field, compare = 'nO', 'subset'
+
+        if compare == 'eq':
+            matched = (snapshot == current)
+        else:
+            matched = set(snapshot) <= set(current)
+
+        if matched:
+            if compare == 'eq':
+                return 'ok', f"gift.vv 与 {field} 一致（{len(snapshot)} 项）"
+            return 'ok', (f"gift.vv 快照 {len(snapshot)} 项 ⊆ {field} "
+                          f"{len(current)} 项（upLevelObj 已废弃为空）")
+
         only_vv = sorted(set(snapshot) - set(current))
         only_up = sorted(set(current) - set(snapshot))
         detail = []
@@ -3633,7 +3740,7 @@ class DetectionEngine:
         if not detail:                       # 键集合相同 → 值不同
             changed = [k for k in sorted(snapshot) if snapshot[k] != current[k]]
             detail.append(f"值不同 {changed}")
-        return 'fail', (f"gift.vv 快照({len(snapshot)}项) ≠ upLevelObj"
+        return 'fail', (f"gift.vv 快照({len(snapshot)}项) ≠ {field}"
                         f"({len(current)}项)：" + "；".join(detail))
 
     @staticmethod
@@ -3699,7 +3806,7 @@ class DetectionEngine:
                     if required_level > vip_level:
                         vip_errors.append(f"权限越界：[{source}]  VIP{vip_level} 开启了 (m{m_val})")
 
-            # ★ 二重检测：gift.vv（导入时的 upLevelObj 快照）↔ 当前 upLevelObj
+            # ★ 二重检测：gift.vv（导入时的权限快照）↔ 当前 nO/upLevelObj
             vv_state, vv_text = DetectionEngine._vip_snapshot_issue(
                 root, vip_level, vip_node=current_vip_node)
 
@@ -3708,7 +3815,7 @@ class DetectionEngine:
                 out_lines.append("❌ VIP权限越界")
                 out_lines.extend(vip_errors)
             if vv_state == 'fail':
-                out_lines.append("❌ VIP二重检测（gift.vv ↔ upLevelObj 快照）")
+                out_lines.append("❌ VIP二重检测（gift.vv ↔ 权限记录 快照）")
                 out_lines.append(f"   {vv_text}")
             if out_lines:
                 return {'title': 'VIP权限检测', 'status': 'fail',
@@ -4015,6 +4122,7 @@ class DetectionEngine:
                  + f" > 应有{r.get('explainable') or 0}"
                  f"（免费{r.get('quota') or 0}+付费{r.get('pay') or 0}"
                  + (f"+券购{r['ticket_buy']}" if r.get('ticket_buy') else "")
+                 + (f"+合成{r['compose_num']}" if r.get('compose_num') else "")
                  + (f"+塔领{r['tower_claimed']}" if r.get('tower_claimed') else "")
                  + (f"+活动{r['adjust']}" if r.get('adjust') else "")
                  + f"）差值{r.get('excess', 0)}份"
@@ -5554,6 +5662,7 @@ class AppDetector:
                         detail = " + ".join(b for b in (
                             f"付费{r.get('pay') or 0}" if r.get('pay') else "",
                             f"券购{r['ticket_buy']}" if r.get('ticket_buy') else "",
+                            f"合成{r['compose_num']}" if r.get('compose_num') else "",
                             f"塔领{r['tower_claimed']}" if r.get('tower_claimed') else "",
                             f"礼包{r['gift_claimed']}" if r.get('gift_claimed') else "",
                             f"活动{r['adjust']}" if r.get('adjust') else "",
