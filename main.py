@@ -32,11 +32,37 @@ main (γ 合并版) v3.1.0 —— 数据检测工具（军队/公会成员存档
                        • 零件按 objType 分类（权威定义见 partsType.ts 注释），
                          普通零件（loader 等）与特殊零件（腐蚀芯片/猎人技能器）不计入，
                          仅统计稀有零件（objType=rare）
+  8. 🗼 虚天塔/幻塔检测   tower 节点（saveXml/null/tower）：
+                       • ws（是否允许参加天塔）：ws=false 时**任何塔数据改动都违法**
+                         （基准 = 全默认 tower 节点，见 test/基础账号.xml）
+                       • 虚天塔：unendLv ≤ 150、uP ≤ 2（每层最多 2 点）、
+                         us ≤ 2（每周仅可用 2 个技能）、usUse 为技能**下标**串
+                         （0~6，不得重复，条数须等于 us）
+                       • 加点：p0/p1/p2 三套方案，等级不超 unendProClass 上限，
+                         且「已用点数 ≤ 可用点数」
+                         （可用 = unendLv×2 + min(uP,2)，见 UnendData.getAllPoint）
+                       • 幻塔：dO 层 1~75 / 难度 1~4，gO ⊆ dO（须先通关才可领奖），
+                         blv ≤ 75
+  9. 🏔 巅峰检测          peak 节点（saveXml/null/peak）：
+                       • lv ∈ [1, 120]（PeakSave.MAX_LV）
+                       • dayExp ≤ 400000000（每日转化上限）；
+                         dpN ≤ 30（全体战力累计加点）、dpDay ≤ 2（每日次数），
+                         且 dpN > 0 时 lv 须 ≥ 100（该功能按等级解锁）
+                       • now ∈ ["", "2", "3"]（PeakSave.labelArr）
+                       • 加点：pointObj/pointObj2/pointObj3 三套方案，等级不超
+                         peakPro 上限，且「已用点数 ≤ 可用点数（= lv）」
+                         （属性 1 点/级、技能 2 点/级，见 PEAK_POINT_DEFS）
+ 10. 🎫 零件位卡检测     武器镶嵌位（partsSave）解锁 + 位卡（格）账目：
+                       • 镶嵌位基础解锁 0~9，其余位置需解锁后才能放零件；
+                         占用未解锁槽位（site ≥ 10 且 lockObj 未登记）→ fail
+                       • 解锁 site 11~16 需 黄金位卡 / 零件位卡
+                         （MustDefineGroup.as；site 10 仅需 50 万硬币），
+                         账目差额仅提示（黄金位卡另有活动来源）
 
 批量导出（按 UID 汇总）：
   • 同一 UID（服务器UID）下多个 uid_index 合并为一份 *_异常详情.txt
-    （含「异常一览」逐档摘要、资产汇总、index 异常单列、逐档详细日志）
-  • CSV 每行对应一个 UID，含 时装/载具/特殊零件/资产价值/资产异常摘要 列
+    （含「异常一览」逐档摘要、资产/塔数据汇总、index 异常单列、逐档详细日志）
+  • CSV 每行对应一个存档 index，含 时装/载具/特殊零件/资产价值/塔数据 列
   • 文件中单独列出“🔢 index 异常单独指出”，标注理论/实际不一致的存档
 
 界面：主页(单文件检测 / 批量检测 / 报告导出 / 打开下载工具) + 设置 + 致谢
@@ -256,7 +282,15 @@ CHIP_MARK = "碎片"              # 碎片为合成材料，不参与计价
 # ★ 未定价物品同样判定：只要差值 > 0 就报（估值缺失不影响差值检测）。
 #   仅当 free_quota.ini 的 [default] min_excess_value > 0 时，才用估值做降噪，
 #   默认 0 = 只要能算出差值就全部报出，交人工复核。
-DEFAULT_FREE_QUOTA = 3          # 未在 free_quota.ini 中登记时的默认免费额度（份）
+#
+# ★ 默认免费额度 = 0（付费物品本就没有免费获取渠道）：
+#     时装：付费时装只能充值购买 → 免费额度必须为 0，否则会把「未购买却持有」
+#           当成正常（等于白送价值）；免费/稀有时装另由 is_free_fashion /
+#           is_rare_fashion 单独处理，不走本兜底值。
+#     零件：额度按 baseLabel 由付费/券购/合成/塔领/礼包逐项累加，同样不该有兜底值。
+#   仅当用户在 free_quota.ini 的 [fashion] 显式登记某款时装的免费份数时才会放宽
+#   （确知某款有活动/赠送渠道时再单独登记）。
+DEFAULT_FREE_QUOTA = 0          # 未登记物品的默认免费额度（份）＝ 无免费渠道
 FREE_QUOTA_FILE = os.path.join(INPUT_DIR, "free_quota.ini")
 FREE_QUOTA_FILE_REL = os.path.join("inputdata", "free_quota.ini")   # 相对写法
 # 仅用于降噪的差值价值门槛（黄金）。0 = 只要有差值就报（检测优先，推荐）。
@@ -515,6 +549,225 @@ def rare_parts_cn_names():
 FREE_QUOTA_FASHION = {}         # 时装默认全部取 DEFAULT_FREE_QUOTA
 FREE_QUOTA_VEHICLE = {}         # 载具同上
 
+# ========================================================
+# 🗼 虚天塔 / 幻塔（tower 节点）解析
+# ========================================================
+# 权威源码：dataAll/_app/tower/{TowerSave,TowerData,UnendData,UnendAgent,UnendDataCtrl}.as
+#          （本地反编译：G:\游戏\爆枪突击\v\ffdec_export\v3690\script\scripts\dataAll\_app\tower\）
+# 数据表：  306_XMLOut_unendProClass.bin（虚天塔加点定义）
+#          TowerDefineCtrl.as（幻塔 75 层定义与各层奖励）
+#
+# 存档节点路径：saveXml/null/tower
+#   ws      : Boolean —— 是否允许参加天塔（false = 未开放/资格关闭）
+#   unendLv : 天塔通关最高层（UnendAgent.MAX_LV）
+#   uP      : 当前层已获得点数（UnendData.LEVEL_POINT 封顶）
+#   uAll    : 老字段，源码已无引用（实测全库恒 0）
+#   us      : 本周已使用技能次数（getSkillCanUseWeek 封顶）
+#   usUse   : 本周已使用技能索引串，如 "4,6"（UnendDataCtrl.SKILL_ARR 下标）
+#   blv     : 幻塔累计通关层（0~75，可带 .5 表示未领奖进度）
+#   dO      : 幻塔各层已通关难度 {层: 1..4}（TowerDefine.MAX_DIFF = 4）
+#   gO      : 幻塔各层已领奖难度，必须 ⊆ dO
+#   p0/p1/p2: 三套加点方案（UnendData.planArr），值为 {属性键: 等级}
+#   pNow    : 当前使用的方案编号 "0"/"1"/"2"（TowerSave.getNow()）
+#   ng      : 改版一次性补偿礼包（base64，领取后清空）
+
+# ① ws —— ★ 经源码与实测复核，**不是「能否参加天塔」的资格开关**：
+#    · 源码（TowerSave.as / TowerData.as）中 ws 仅有两处**显示层**用途：
+#        getUIArr()  → 过滤「已通关满难度且无可领奖励」的层，
+#                      ws==false 时把这些层从幻塔列表里隐藏；
+#        winShowB() / swapWinShow() → 供 UI「显示/隐藏已通关层」按钮切换
+#                      （TowerListBoard.as: `coverBtn.isChosen = !winShowB()`）。
+#      没有任何服务端校验、也没有限制挑战/参赛的逻辑。
+#    · 实测：ws=true 与 ws=false 两组都有 deep 进度
+#      （ws=false 中 **124 档天塔已通 150 层**、ws=true 中亦有 150 层），
+#      若 ws 表示参赛资格则与「已通关」自相矛盾 → 佐证其为 UI 开关。
+#    · 因此 **不可**用 ws 判定资格或改动合法性；塔数据一律按字段规则逐项校验。
+TOWER_WS_FIELD = 'ws'      # 仅用于报告展示「幻塔列表已通关层显示开关」状态
+
+# ② 天塔层数上限：UnendAgent.MAX_LV（v36.9 = 150；旧版 32.xx = 130）。
+#    取最新版上限，低于该值的旧档一律合法。
+TOWER_MAX_LEVEL = 150
+
+# ③ 虚天点数：UnendData.LEVEL_POINT = 2 —— 每层最多 2 点，每击杀 1 次未通关层首领得 1 点。
+TOWER_LEVEL_POINT = 2
+
+# ④ 每周技能使用上限：UnendData.getSkillCanUseWeek() = 2（每周仅可用 2 个技能）。
+TOWER_SKILL_WEEK_LIMIT = 2
+
+# ⑤ 技能表：UnendDataCtrl.SKILL_ARR（usUse 存的是**下标**，非技能名）。
+TOWER_SKILL_ARR = [
+    'invincibleHole',      # 0 无敌光环
+    'verShield',           # 1 竖盾
+    'spellImmunityMax',    # 2 技能免除
+    'blackHoleDemon',      # 3 黑洞射线
+    'BallLightningCd',     # 4 技能衰减
+    'killPoison',          # 5 绝命尸毒
+    'cantMove',            # 6 监禁
+]
+TOWER_SKILL_CN = {
+    'invincibleHole': '无敌光环', 'verShield': '竖盾', 'spellImmunityMax': '技能免除',
+    'blackHoleDemon': '黑洞射线', 'BallLightningCd': '技能衰减', 'killPoison': '绝命尸毒',
+    'cantMove': '监禁',
+}
+
+# ⑥ 幻塔层数上限：TowerDefineCtrl 的 <one> 数量（实测 75 层），MAX_DIFF = 4 难度。
+TOWER_MAX_FLOOR = 75
+TOWER_MAX_DIFF = 4
+
+# ⑦ 虚天塔加点定义（306_XMLOut_unendProClass.bin）
+#    键 → (中文名, 等级上限, 每级消耗点数)
+#    注：AS3 PeakProDefine.inData_byXML 令 firstPoint = point，getMustPointSum(lv)=lv*point，
+#        故「已用点数」= 等级 × 每级消耗（CDATA 区块内的 lifeBottle/skillFleshCard 未生效，不登记）。
+TOWER_POINT_DEFS = {
+    # ---- father = state（每级 1 点）----
+    'allHurtMul': ('伤害', 60, 1),
+    'cdMul': ('技能回速', 50, 1),
+    'angerMul': ('怒气回速', 60, 1),
+    'defenceMul': ('防御力', 80, 1),
+    # ---- father = parnter ----
+    'parnterPoint': ('队友生效加点', 1, 50),
+    # ---- father = levelInfo ----
+    'tm': ('倒计时/秒', 100, 1),
+    # ---- father = props ----
+    'caisson': ('弹药箱', 6, 4),
+    'rebirthStone': ('重生石', 10, 5),
+    'teamRebirthCard': ('队友重生卡', 10, 5),
+    # ---- father = other ----
+    'allBossShow': ('首领全出场', 1, 2),
+}
+# 方案编号（UnendData.planArr / planCnArr）
+TOWER_PLAN_KEYS = ('p0', 'p1', 'p2')
+TOWER_PLAN_CN = {'p0': '方案1', 'p1': '方案2', 'p2': '方案3'}
+
+# ========================================================
+# 🏔 巅峰（peak 节点）解析
+# ========================================================
+# 权威源码（AS3 原版）:
+#   dataAll/_app/peak/{PeakSave,PeakData,PeakProDefine,PeakProDefineGroup}.as
+#   （本地副本：E:\Git\data\bqtj_raw_file\dataAll\_app\peak\）
+# 权威源码（官方 TS 重写，注释更完整、字段语义一致）:
+#   frontend/src/data/archive/module/peak/{save/peakSave,define/peakConst,
+#                                          define/peakDefine,data/peakData}.ts
+#   资源表 frontend/src/data/archive/resource/peak/peakPro.json
+#   （本地副本：E:\Git\data\lazy\bqyx-query-initial-main\）
+#
+# 存档节点路径：saveXml/null/peak（顶层，不在队友 SAVE 内）
+#   lv      : 巅峰等级（默认 1）
+#   exp     : 当前等级经验（上限表 peakExp 缺本地副本，故仅做负值防御）
+#   dayExp  : 今日已转化经验（每日上限 PeakSave.MAX_DAY_EXP）
+#   dpN     : 「全体战力」累计加点次数（PeakSave.MAX_WHOLE_DPS_NUM）
+#   dpDay   : 「全体战力」今日加点次数（PeakSave.WHOLE_DPS_DAY）
+#   now     : 当前方案编号（PeakSave.labelArr = ["", "2", "3"]）
+#   pointObj / pointObj2 / pointObj3 : 三套加点方案 {属性键: 等级}
+PEAK_PLAN_KEYS = ('pointObj', 'pointObj2', 'pointObj3')
+PEAK_PLAN_CN = {'pointObj': '方案1', 'pointObj2': '方案2', 'pointObj3': '方案3'}
+
+# ① PeakSave.MAX_LV —— 巅峰最高等级（默认 1，上限 120）。
+PEAK_MAX_LEVEL = 120
+# ② PeakSave.MAX_DAY_EXP —— 每日可转化的巅峰经验上限。
+#    注：官方 TS 重写里写作 2e8，但 AS3（游戏实际逻辑）为 4e8，
+#        且实测语料中恰有 48 档 dayExp == 400000000 → 以 AS3 为准。
+PEAK_MAX_DAY_EXP = 400000000
+# ③ PeakSave.MAX_WHOLE_DPS_NUM —— 「全体战力」加点次数上限（每次 +0.5%）。
+PEAK_MAX_WHOLE_DPS_NUM = 30
+# ④ PeakSave.WHOLE_DPS_DAY —— 「全体战力」每日可加点次数。
+PEAK_WHOLE_DPS_DAY = 2
+# ⑤ PeakSave.WHOLE_DPS_LV —— 开启「全体战力」加点所需的最低巅峰等级。
+PEAK_WHOLE_DPS_LV = 100
+# ⑥ 当前方案编号的合法取值（PeakSave.labelArr = ["", "2", "3"]）。
+PEAK_NOW_VALUES = ('', '2', '3')
+
+# ⑦ 巅峰加点定义（权威：resource/peak/peakPro.json ≡ 257_XMLOut_peakProClass.bin）
+#    键 → (中文名, 等级上限, 每级消耗点数)
+#    ★ 消耗点数来源（AS3 PeakProDefine）：
+#        构造器 `this.point = 1`；
+#        inData_byXML 中 father == "peak" 且 skill != "" → `this.point = 2`
+#      getMustPointSum(lv) = Σ getMustPointByLv(i) = lv × point
+#        （原版因 firstPoint 恒等于 point，等价于「等级 × point」）
+#    → 普通属性 1 点/级；三个「技能」项（skill 非空）2 点/级。
+#    注：TS 重写版把技能统一改成 point=1，那是**重写实现的偏差**；
+#        AS3 才是在线游戏实际逻辑（且「技能项 2 点/级」能把
+#        lv=28 却点了 173 点的改档档准确检出）。
+PEAK_POINT_DEFS = {
+    # ---- 属性加点（father = peak，skill 为空 → 1 点/级）----
+    'dpsAll': ('战斗力', 15, 1),
+    'lifeAll': ('生命值', 15, 1),
+    'critPro3': ('3倍暴击概率', 10, 1),
+    'dodge': ('闪避概率', 15, 1),
+    'cdMul': ('技能回复', 10, 1),
+    'fightDedut': ('近战伤害减免', 15, 1),
+    'moveMul': ('移动速度', 10, 1),
+    'bulletDedut': ('防弹值', 15, 1),
+    'vehicleDpsMul': ('载具攻击力', 20, 1),
+    # ---- 技能项（skill 非空 → 2 点/级）----
+    'nuclear_peak': ('核爆', 8, 2),
+    'gaze_peak': ('注视', 8, 2),
+    'sacrifice_peak': ('搏命', 8, 2),
+}
+# 旧键别名：PeakSave.inData_byObj 会把 pointObj 里的 `vehicleDefMul` 迁移为
+# `vehicleDpsMul`（迁移后清除旧键）。语料中 0 命中，仅作兼容别名登记。
+PEAK_POINT_ALIASES = {'vehicleDefMul': 'vehicleDpsMul'}
+
+# ========================================================
+# 🎫 零件位卡 / 黄金零件位卡（partsGridCard / godGridCard）
+# ========================================================
+# 权威源码:
+#   dataAll/must/define/MustDefineGroup.as   :100-111  ← 零件位解锁成本表
+#   dataAll/items/save/ItemsSaveGroup.as              ← lockObj / lockLen 语义
+#   UI/bag/ItemsGripUnlockCtrl.as                     ← 解锁入口（type=="parts"）
+#   dataAll/_player/PlayerSave.as                     ← 各背包初始 unlockTo
+# 物品表（inputdata/good_items.csv，GBK）:
+#   4486  零件位卡   partsGridCard   系统功能   40   「零件券兑换」
+#   4579  黄金位卡   godGridCard     其他       30   「商店购买」
+#   4462  零件格子   （英文名为空）   零件扩展   30   ← 实为**旧版黄金零件位卡**
+#
+# ★ propId 4462「零件格子」= 旧版（v33.x 及更早）的黄金零件位卡：
+#   该 ID 现已并入「黄金位卡」(godGridCard)，但**旧存档的 pay.obj 只记 propId**，
+#   故 4462 的购买次数必须一并计入 godGridCard 的获取账目，否则老档会被误判为
+#   「黄金位卡不足」（实测 191 档含 4462 记录，其中 120 档无 4579）。
+GRID_CARD_PROP_ID = {'godGridCard': (4579, 4462), 'partsGridCard': (4486,)}
+GRID_CARD_CN = {'godGridCard': '黄金位卡', 'partsGridCard': '零件位卡'}
+
+# ---- 槽位解锁语义（ItemsSaveGroup.as，★用户口径）----
+#   零件的**武器镶嵌位**（partsSave）基础解锁为 0~9（lockLen = 10），
+#   其余位置均需解锁后才能在存档里出现对应 site 的零件：
+#       getUnlockBySite(site) = (site <= lockLen - 1) or (lockObj[site] == 1)
+#       getCanFillLen()       = lockLen + count(lockObj[n] == 1 && n >= lockLen)
+#   → 任何条目都必然满足  site < getCanFillLen()
+#     （ItemsDataGroup.as:989-990 放不下时直接拒绝，故这是硬约束）
+#   注：lockObj 允许登记 site < lockLen 的位置（游戏 unlockNextSiteNum 会整段
+#       批量写入基础额度，实测大量存档 lockObj 形如 (10,12,15)），故**不能**
+#       仅凭 "site >= lockLen 却不在 lockObj" 判定（会把正常批量解锁误报）。
+# partsSave（武器镶嵌位）的基础解锁位数：site 0~9 无需解锁（用户口径）
+PARTS_WEAR_BASE_UNLOCK = 10
+
+# ★ 零件位解锁成本表（MustDefineGroup.as :100-111）
+#   表内为 1-based「真 site」，itemsSave 的 site 为 0-based → 真 site = site + 1
+#     parts[11] = "10;500000;0"        → 50 万硬币（用户口径：相当于免费）
+#     parts[12] = godGridCard  ×1      黄金位卡
+#     parts[13] = partsGridCard ×1     零件位卡
+#     parts[14] = godGridCard  ×1
+#     parts[15] = godGridCard  ×1
+#     parts[16] = partsGridCard ×1
+#     parts[17] = godGridCard  ×1
+#   值 = (卡名 或 None, 份数)；None 表示仅需硬币（不计位卡）
+#
+# ★★ 各位置**互相独立，无高低/顺序之分**（用户明确）：
+#   游戏 UI 点击任意一个未解锁格位都会单独调用
+#   `dataGroup.getSaveGroup().unlockSite(nowSite)`（ItemsGripUnlockCtrl.as），
+#   直接按该 site 对应的道具扣费并把该 site 写进 lockObj ——
+#   **不需要先解锁前面的位置**（未解锁 10 号也能直接解锁 17 号）。
+#   因此校验时只能**逐位置独立比对成本**，不可做「按顺序前置解锁」推断。
+PARTS_SLOT_UNLOCK_COST = {
+    10: (None, 0),                # 50 万硬币，视为免费
+    11: ('godGridCard', 1),
+    12: ('partsGridCard', 1),
+    13: ('godGridCard', 1),
+    14: ('godGridCard', 1),
+    15: ('partsGridCard', 1),
+    16: ('godGridCard', 1),
+}
+
 # ★ 稀有零件的「活动修正」：活动/兑换码/赠送等**存档内查不到记录**的来源，
 #   无法从存档自动统计，只能按零件人工登记 —— 即 free_quota.ini 的 [parts_adjust]。
 #   差值 = 持有一阶当量 −（付费 + 券购 + 塔领 + 活动修正）
@@ -524,6 +777,7 @@ ASSET_PARTS_ADJUST = 'parts_adjust'
 FREE_QUOTA_TABLES = {ASSET_FASHION: {}, ASSET_VEHICLE: {},
                      ASSET_PARTS: {}, ASSET_PARTS_ADJUST: {}}
 _free_quota_path = None
+_free_quota_stamp = None       # (mtime, size) 文件指纹，用于检测 ini 被改动
 _free_quota_error = ''
 
 
@@ -564,8 +818,9 @@ def _default_free_quota_ini():
         "",
         "[fashion]",
         "; 时装免费额度 = 活动/赠送等免费渠道允许的份数（差值 = 持有 − 本值 − 付费次数）",
-        "; 未列出的取 [default] quota；如需单独指定，取消下行注释并修改",
-        "; 示例 = 1",
+        "; ★ 付费时装没有免费获取方法 → 免费额度就应为 0（默认），不要随意调大；",
+        ";   确知某款有活动/赠送渠道时，才单独登记该款的份数（如 某时装 = 1）",
+        "; 未列出的取 [default] quota",
         "; 注：免费时装（小7/小娜/扶光/望舒/红魔/小卡/小隆/小田时装）不做差值判定；",
         ";     稀有时装（免费与付费之外的时装）单列「稀有时装」区块，持有即列出（含获取时间）",
     ]
@@ -582,6 +837,8 @@ def _default_free_quota_ini():
         "",
         "[default]",
         "; 未在上方登记的物品所使用的默认免费额度（时装用；零件请用 [parts_adjust]）",
+        "; ★ 默认 0 = 视为「无免费获取渠道」：付费时装只能充值购买，零件额度由",
+        ";   付费/券购/合成/塔领/礼包逐项累加，均不应有兜底额度",
         f"quota = {DEFAULT_FREE_QUOTA}",
         "; 仅降噪用：差值价值低于该值时不报异常（0 = 只要有差值就全部报出，推荐）",
         "; 差值判定本身与估值无关，未定价物品同样会报",
@@ -645,11 +902,21 @@ def load_free_quota(path=None, force=False):
                   min_excess_value = 0  # 仅降噪：差值价值门槛（0 = 有差值就报）
 
     返回 (tables, error)；tables 为 {kind: {名称: 额度}}。
-    同一路径只加载一次（除非 force=True）。
+
+    ★ 缓存按**文件指纹**（mtime + size）判定，而非仅凭路径：
+      旧实现用 `_free_quota_path == target` 作命中条件，用户编辑 ini 后
+      只要程序未重启就永远读到旧表（表现为「改了 adjust 却不生效」）。
+      现每次比对 mtime/size，文件一变即自动重载（无需 force）。
     """
-    global _free_quota_path, _free_quota_error, DEFAULT_FREE_QUOTA, DEFAULT_ABNORMAL_MIN_VALUE
+    global _free_quota_path, _free_quota_stamp, _free_quota_error
+    global DEFAULT_FREE_QUOTA, DEFAULT_ABNORMAL_MIN_VALUE
     target = ensure_free_quota_ini(path)
-    if not force and _free_quota_path == target:
+    try:
+        st = os.stat(target)
+        stamp = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        stamp = None
+    if not force and _free_quota_path == target and _free_quota_stamp == stamp:
         return FREE_QUOTA_TABLES, _free_quota_error
 
     parser = configparser.ConfigParser()
@@ -697,6 +964,7 @@ def load_free_quota(path=None, force=False):
                 pass
 
     _free_quota_path = target
+    _free_quota_stamp = stamp
     _free_quota_error = error
     # 旧配置补齐 [parts_adjust]（活动修正参数），使差值公式的四个来源都可见
     if not error and not FREE_QUOTA_TABLES.get(ASSET_PARTS_ADJUST):
@@ -1443,6 +1711,36 @@ class ReportRenderer:
             lines.append("🚨 【封禁槽位】" + "；".join(ban_tags))
             lines.append("")
 
+        # ---- 虚天塔 / 幻塔汇总（有塔数据即展示）----
+        tower_lines = []
+        for it in items:
+            if it.get('tower'):
+                tower_lines.append(f"   • [{it['theory']}] {it['tower'].get('text', '')}")
+        if tower_lines:
+            lines.append("🗼 【虚天塔 / 幻塔】")
+            lines.extend(tower_lines)
+            lines.append("")
+
+        # ---- 巅峰汇总（有巅峰数据即展示）----
+        peak_lines = []
+        for it in items:
+            if it.get('peak'):
+                peak_lines.append(f"   • [{it['theory']}] {it['peak'].get('text', '')}")
+        if peak_lines:
+            lines.append("🏔 【巅峰】")
+            lines.extend(peak_lines)
+            lines.append("")
+
+        # ---- 零件位卡汇总（有位卡数据即展示）----
+        grid_lines = []
+        for it in items:
+            if it.get('grid'):
+                grid_lines.append(f"   • [{it['theory']}] {it['grid'].get('text', '')}")
+        if grid_lines:
+            lines.append("🎫 【零件位卡 / 黄金零件位卡】")
+            lines.extend(grid_lines)
+            lines.append("")
+
         # index 异常单独指出
         if mismatch_items:
             lines.append("🔢 【index 异常单独指出】")
@@ -1470,6 +1768,12 @@ class ReportRenderer:
                 lines.append(f"🚨 封禁情况：{it['ban_tag']}")
             if it['index_mismatch']:
                 lines.append(f"🔢 index 异常：{it['index_tag']}")
+            if it.get('tower'):
+                lines.append(f"🗼 虚天塔/幻塔：{it['tower'].get('text', '')}")
+            if it.get('peak'):
+                lines.append(f"🏔 巅峰：{it['peak'].get('text', '')}")
+            if it.get('grid'):
+                lines.append(f"🎫 零件位卡：{it['grid'].get('text', '')}")
             lines.append(f"📝 异常摘要：{it['reason']}")
             lines.append("")
             lines.append("📋 详细检测日志:")
@@ -1495,8 +1799,143 @@ class ReportRenderer:
             return '无'
         return f"{uid_index}_{name}" if name else str(uid_index)
 
-    # ---- 槽位级资产摘要（CSV「每 index 一行」用）----
+    # ---- 虚天塔 / 幻塔文本 ----
     @staticmethod
+    def _tower_skill_names(us_use):
+        """usUse（技能**下标**串，如 "4,6"）→ 技能中文名列表。
+
+        越界下标标为「索引N(越界)」，非数字原样保留 —— 检测项会另报 fail。
+        """
+        if not us_use:
+            return []
+        names = []
+        for part in str(us_use).split(','):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                idx = int(part)
+            except ValueError:
+                names.append(part)
+                continue
+            if 0 <= idx < len(TOWER_SKILL_ARR):
+                names.append(TOWER_SKILL_CN.get(TOWER_SKILL_ARR[idx],
+                                                TOWER_SKILL_ARR[idx]))
+            else:
+                names.append(f"索引{idx}(越界)")
+        return names
+
+    @staticmethod
+    def build_tower_text(profile):
+        """单个存档的塔数据 → 单行文本（供详情文件与批量 CSV「塔数据」列）。
+
+        形如：天塔 145/150 层｜点数 286/290｜每周技能 0/2｜幻塔 45/75 层
+        点数展示为「当前方案已用/可用」；已用 > 可用即异常（检测项会报 fail）。
+        """
+        if not profile:
+            return ''
+        pnow = profile.get('pNow') if profile.get('pNow') in TOWER_PLAN_KEYS else 'p0'
+        used = DetectionEngine._tower_points_used(
+            (profile.get('plans') or {}).get(pnow))
+        available = (profile.get('unendLv', 0) * TOWER_LEVEL_POINT
+                     + min(profile.get('uP', 0), TOWER_LEVEL_POINT))
+        bits = [f"天塔 {profile.get('unendLv', 0)}/{TOWER_MAX_LEVEL} 层",
+                f"点数 {used}/{available}",
+                f"每周技能 {profile.get('us', 0)}/{TOWER_SKILL_WEEK_LIMIT}"]
+        skills = ReportRenderer._tower_skill_names(profile.get('usUse'))
+        if skills:
+            bits.append('已用技能 ' + '、'.join(skills))
+        blv_text = profile.get('blv_raw') or profile.get('blv', 0)
+        bits.append(f"幻塔 {blv_text}/{TOWER_MAX_FLOOR} 层"
+                    + ("（列表隐藏已通关层）" if not profile.get('ws') else ""))
+        return '｜'.join(bits)
+
+    @staticmethod
+    def build_slot_tower_summary(tower_res):
+        """单个存档的**塔检测结果** → 槽位级摘要（CSV「塔数据」列用）。
+
+        与 build_tower_text 的区别：本方法面向 tower_res（含 status），
+        异常时在首部标 ⛔ 并附问题摘要，便于在 CSV 中一眼看到哪一档不合格。
+        """
+        if not tower_res or not tower_res.get('tower'):
+            return '无'
+        text = ReportRenderer.build_tower_text(tower_res['tower'])
+        if tower_res.get('status') == 'fail':
+            return '⛔ ' + text
+        if tower_res.get('status') == 'warn':
+            return '⚠️ ' + text
+        return text
+
+    @staticmethod
+    def build_peak_text(profile):
+        """单个存档的巅峰数据 → 单行文本（供详情文件与批量 CSV「巅峰」列）。
+
+        形如：巅峰 120/120 级｜点数 120/120｜全体战力 30/30（今日 0/2）｜今日经验 0
+        点数展示为「当前方案已用/可用」；已用 > 可用即异常（检测项会报 fail）。
+        """
+        if not profile:
+            return ''
+        lv = profile.get('lv', 1)
+        now = profile.get('now') or ''
+        cur = 'pointObj' + now if ('pointObj' + now) in PEAK_PLAN_KEYS else 'pointObj'
+        used = (profile.get('points') or {}).get(cur, 0)
+        bits = [f"巅峰 {lv}/{PEAK_MAX_LEVEL} 级", f"点数 {used}/{lv}"]
+        if profile.get('has_dpN'):
+            bits.append(f"全体战力 {profile.get('dpN', 0)}/{PEAK_MAX_WHOLE_DPS_NUM}"
+                        + (f"（今日 {profile.get('dpDay', 0)}/{PEAK_WHOLE_DPS_DAY}）"
+                           if profile.get('has_dpDay') else ""))
+        bits.append(f"今日经验 {profile.get('dayExp', 0):,}")
+        return '｜'.join(bits)
+
+    @staticmethod
+    def build_slot_peak_summary(peak_res):
+        """单个存档的**巅峰检测结果** → 槽位级摘要（CSV「巅峰」列用）。
+
+        异常时在首部标 ⛔ / ⚠️，便于在 CSV 中一眼看到哪一档不合格。
+        """
+        if not peak_res or not peak_res.get('peak'):
+            return '无'
+        text = ReportRenderer.build_peak_text(peak_res['peak'])
+        if peak_res.get('status') == 'fail':
+            return '⛔ ' + text
+        if peak_res.get('status') == 'warn':
+            return '⚠️ ' + text
+        return text
+
+    @staticmethod
+    def build_grid_card_text(profile):
+        """单个存档的位卡数据 → 单行文本（详情文件与 CSV「位卡」列）。
+
+        形如：镶嵌位最高 site 14｜零件背包 55/144 位｜位卡 零件位卡 28
+        """
+        if not profile:
+            return ''
+        wear = [c for c in profile.get('containers') or [] if c['kind'] == 'partsSave']
+        bits = []
+        if wear:
+            bits.append(f"镶嵌位最高 site {max(c['maxSite'] for c in wear)}")
+        pb = next((c for c in (profile.get('containers') or [])
+                   if c['node'] == 'partsBag'), None)
+        if pb:
+            bits.append(f"零件背包 {pb['filled']}/{pb['lockLen']} 位")
+        held = '、'.join(f"{GRID_CARD_CN[k]} {profile['hold'][k]}"
+                        for k in GRID_CARD_CN if (profile.get('hold') or {}).get(k))
+        bits.append('位卡 ' + (held or '无'))
+        return '｜'.join(bits)
+
+    @staticmethod
+    def build_slot_grid_card_summary(grid_res):
+        """单个存档的**位卡检测结果** → 槽位级摘要（CSV「位卡」列用）。"""
+        if not grid_res or not grid_res.get('grid'):
+            return '无'
+        text = ReportRenderer.build_grid_card_text(grid_res['grid'])
+        if grid_res.get('status') == 'fail':
+            return '⛔ ' + text
+        if grid_res.get('status') == 'warn':
+            return '⚠️ ' + text
+        return text
+
+    # ---- 槽位级资产摘要（CSV「每 index 一行」用）----    @staticmethod
     def build_slot_asset_summary(asset_res):
         """把单个存档的资产结果压成该**槽位自身**的摘要（不做 UID 合并）。
 
@@ -1918,18 +2357,21 @@ class ReportRenderer:
         """uid_rows → CSV 行列表（★ 一行 = 一个存档 index，便于按槽位筛选）。
 
         列顺序：UID_Index | Name | VIP | 状态 | 涉及存档数 | 封禁槽位 |
-                时装 | 载具 | 特殊零件 | 资产价值 | 资产异常摘要 | 异常摘要
+                时装 | 载具 | 特殊零件 | 资产价值 | 塔数据 | 巅峰 | 位卡 |
+                资产异常摘要 | 异常摘要
 
         口径说明（与旧版「每 UID 一行」的差异）：
           • UID_Index / Name 为该存档自身；
-          • 状态 / 封禁槽位 / 资产各列均为**该槽位自身**口径 —— 不再取 UID 内
-            各档的最大值（旧版多档账号的多行会显示同一份合并数据，无法定位到具体档）；
+          • 状态 / 封禁槽位 / 资产 / 塔数据 / 巅峰 / 位卡 各列均为**该槽位自身**口径 ——
+            不再取 UID 内各档的最大值（旧版多档账号的多行会显示同一份合并数据，
+            无法定位到具体档）；
           • 涉及存档数 = 该 UID 的异常档总数（便于判断本行在账号内的位置）；
           • 未参与检测的封禁槽位（服务器未返回内容、无 XML）各自单独成行
             （状态 fail、封禁槽位列写明原因），保证封禁信息不因逐槽位拆分而丢失。
         """
         rows = [['UID_Index', 'Name', 'VIP', '状态', '涉及存档数', '封禁槽位',
-                 '时装', '载具', '特殊零件', '资产价值', '资产异常摘要', '异常摘要']]
+                 '时装', '载具', '特殊零件', '资产价值', '塔数据', '巅峰', '位卡',
+                 '资产异常摘要', '异常摘要']]
 
         def _clean(text, limit=400):
             text = (text or '').replace('\n', ' ').replace('\r', ' ').replace(',', '，')
@@ -1960,6 +2402,9 @@ class ReportRenderer:
                     asset.get('vehicle_text') or '无',
                     asset.get('parts_text') or '无',
                     asset.get('value') if asset.get('value') is not None else '无',
+                    (it.get('tower') or {}).get('text') or '无',
+                    (it.get('peak') or {}).get('text') or '无',
+                    (it.get('grid') or {}).get('text') or '无',
                     _clean(asset.get('reason')) or '无',
                     _clean("；".join(slot_reason)) or '无',
                 ])
@@ -1976,7 +2421,7 @@ class ReportRenderer:
                     'fail',
                     total_slots,
                     text,
-                    '无', '无', '无', '无', '无',
+                    '无', '无', '无', '无', '无', '无', '无', '无',
                     f"🚨 封禁（服务器未返回内容，未参与检测）：{text}",
                 ])
         return rows
@@ -2484,6 +2929,9 @@ class AssetCollector:
     EQUIP_NODES = ('equip', 'equipBag', 'equipHouse')
     # 武器容器（内含 partsSave.arr 镶嵌零件）
     ARMS_NODES = ('arms', 'armsBag', 'armsHouse')
+    # 背包类容器（均带 lockLen / lockObj 槽位解锁机制，见 check_grid_card_xml）
+    BAG_NODES = ('partsBag', 'equipBag', 'equipHouse', 'armsBag', 'armsHouse',
+                 'thingsBag', 'geneBag')
     # 队友存档节点
     TEAM_NODES = ('more', 'moreBag')
 
@@ -2501,6 +2949,7 @@ class AssetCollector:
         self.level_gift_claimed = set()   # 已领取的等级礼包键（如 dgcpu1，见 LEVEL_GIFT_PARTS）
         self.pay_totals = {}       # {kind: {名称: 付费次数}}（购买记录，供缺口反查）
         self.pay_shared = set()    # {(kind, key)} ID 复用共享次数 → 缺口核查豁免
+        self.has_true_phage = False   # 存档内是否存在 2022-09-22 的真·噬原时装
         self.upgrade_base_used = defaultdict(int)   # {(kind, key): 份数} 被升级消耗
         self.upgrade_targets = set()   # {(kind, key)} 升级目标（来源计入 pay_totals）
         # 判定阈值统一来自 inputdata/free_quota.ini 的免费额度，
@@ -2819,6 +3268,42 @@ class AssetCollector:
             return ASSET_PARTS
         return None
 
+    def _has_true_phage(self):
+        """存档内是否存在 2022-09-22 的**真·噬原时装**（ID 复用判定基准）。
+
+        噬原时装（propId 4327 / 英文名 phage）仅在 v28.7 上架当天
+        （2022-09-22）可获取，随后该 ID 被噬魂时装（phageNew）复用。
+        故只有获取时间落在该日期的条目才是真噬原；没有它则说明本存档里
+        所有标着“噬原时装”的条目（含 pay 侧的 4575/4327 记录）实际都是噬魂时装。
+        """
+        for source in (ASSET_SOURCE_MAIN, ASSET_SOURCE_TEAM):
+            for rec in self.items[ASSET_FASHION][source].values():
+                if (rec.get('name') or '').strip() != 'phage':
+                    continue
+                if (rec.get('get_time') or '')[:10] == '2022-09-22':
+                    return True
+        return False
+
+    def _merge_reused_fashion_key(self, key):
+        """ID 复用：旧名（如 phage 噬原时装）在存档内**无真身**时归并到新名。
+
+        存档条目侧的同类修正见 `_item_meta` → `id_reuse_fix()`；但 **pay 侧**
+        （pay.obj 只记 propId，如 4575/4327）过去未做此修正，于是把购买次数
+        留在 phage 名下，而存档内根本不存在 phage 条目 → 凭空报出
+        「噬原时装 缺 N 份」（实测 1132391273_5 / 2282425038_0 等）。
+        现在：本存档无 2022-09-22 真噬原时，phage → phageNew（噬魂时装）。
+        """
+        if self.has_true_phage or not key:
+            return key
+        rule = ID_REUSE_FIXES.get((key or '').strip())
+        if not rule:
+            return key
+        fixed_cn = rule[0]
+        info = self.table.by_cn.get(fixed_cn)
+        if info and info.get('en'):
+            return info['en']
+        return key
+
     def _pay_totals(self, bought):
         """把 pay 的 propId 归并成 {kind: {key: 数量}}。
 
@@ -2865,6 +3350,9 @@ class AssetCollector:
                     #   存档侧 "burstParts_2"）→ 统一归一到 baseLabel，
                     #   否则付费次数永远匹配不上（稀有零件付费统计丢失）。
                     key = parts_base_label(key)
+                elif kind == ASSET_FASHION:
+                    # ★ ID 复用归并：无真噬原时 phage → phageNew（见方法注释）
+                    key = self._merge_reused_fashion_key(key)
                 if cnt > totals[kind][key]:   # 复用变体共享同一次数，取最大而非累加
                     totals[kind][key] = cnt
                 if shared:
@@ -2903,6 +3391,9 @@ class AssetCollector:
         #    goods.buyNumObj: 各渠道购买次数（_p = 零件券商店，不花黄金）
         #    tower.gO       : 虚天塔通关进度 → 已领取的塔层零件奖励
         #    gift.caO       : 物品合成**累计**次数（稀有零件的一阶来源之一）
+        # ★ 先确定「本存档是否存在 2022-09-22 的真噬原时装」：pay 侧的 ID 复用
+        #   归并（phage → phageNew）依赖该判定，必须先于 _pay_totals 求值。
+        self.has_true_phage = self._has_true_phage()
         bought = self._load_pay(save_node)
         pay_totals = self._pay_totals(bought)
         self.pay_totals = pay_totals      # 供「购买了但存档内无」反查
@@ -3292,9 +3783,13 @@ class AssetCollector:
         # 2) 存档内完全未见（购买记录中的付费载具 / 付费时装）
         present = {ASSET_FASHION: set(), ASSET_VEHICLE: set()}
         for kind in (ASSET_FASHION, ASSET_VEHICLE):
-            for rec in (summary.get(kind) or {}).get('items', {}).values():
-                for token in (rec.get('name'), self.table._norm_name(rec.get('name')),
-                              rec.get('cn'), rec.get('base')):
+            for key, rec in (summary.get(kind) or {}).get('items', {}).items():
+                # ★ 必须同时登记 key 与 en_effective：ID 复用修正后，merged 的 key
+                #   与 en_effective 是**修正后**的名字（如 phageNew），而 rec['name']
+                #   仍是存档里的旧名（phage）—— 只登记旧名会让“存档内确有噬魂时装”
+                #   被误判为「未见」，从而在 pay 侧并入 phageNew 后凭空报缺口。
+                for token in (key, rec.get('name'), self.table._norm_name(rec.get('name')),
+                              rec.get('cn'), rec.get('base'), rec.get('en_effective')):
                     if token:
                         present[kind].add(str(token).strip())
                 if kind == ASSET_VEHICLE:
@@ -4147,6 +4642,781 @@ class DetectionEngine:
             ) or '正常',
         }
         return res
+
+    # ----------------------------------------------------------------
+    # 🗼 虚天塔 / 幻塔检测
+    # ----------------------------------------------------------------
+    @staticmethod
+    def _tower_child(node, name):
+        """取 tower 节点下的直接子节点（按 name 精确匹配）。"""
+        if node is None:
+            return None
+        for child in node:
+            if child.get('name') == name:
+                return child
+        return None
+
+    @classmethod
+    def _tower_num(cls, tower, name, default=0):
+        """读取 tower 下的数值字段；缺失/非法 → default。"""
+        el = cls._tower_child(tower, name)
+        if el is None or not (el.text or '').strip():
+            return default
+        try:
+            return int(float(el.text.strip()))
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _tower_bool(cls, tower, name, default=False):
+        el = cls._tower_child(tower, name)
+        if el is None:
+            return default
+        return (el.text or '').strip().lower() == 'true'
+
+    @classmethod
+    def _tower_str(cls, tower, name, default=''):
+        el = cls._tower_child(tower, name)
+        return el.text if (el is not None and el.text is not None) else default
+
+    @classmethod
+    def _tower_map(cls, tower, name):
+        """读取 <name><saveObj> 下的 {键: 文本} 映射（dO / gO / p0 / p1 / p2）。"""
+        node = cls._tower_child(tower, name)
+        if node is None:
+            return {}
+        save_obj = cls._tower_child(node, 'saveObj')
+        if save_obj is None:
+            return {}
+        out = {}
+        for child in save_obj:
+            key = (child.get('name') or '').strip()
+            if key:
+                out[key] = (child.text or '').strip()
+        return out
+
+    @staticmethod
+    def find_tower_node(root):
+        """定位存档内的 tower 节点：<null>/tower（队友 SAVE 内不重复统计）。"""
+        if root is None:
+            return None
+        save = root
+        if save.get('name') != 'null':
+            inner = save.find('s[@name="null"]')
+            if inner is not None:
+                save = inner
+        return save.find('s[@name="tower"]')
+
+    @classmethod
+    def tower_profile(cls, file_path):
+        """采集 tower 节点的全部字段（供检测与报告复用），无节点返回 None。
+
+        返回 {ws, unendLv, uP, uAll, us, usUse(原始串), usUse_ids, blv,
+              plans:{p0..:{键:等级}}, pNow, dO:{层:难度}, gO:{层:难度}, ng, has_lv}
+        """
+        root, _, _ = smart_load_xml(file_path)
+        tower = cls.find_tower_node(root)
+        if tower is None:
+            return None
+        us_use = cls._tower_str(tower, 'usUse', '')
+        plan_raw = {k: cls._tower_map(tower, k) for k in TOWER_PLAN_KEYS}
+        plans = {}
+        for key, obj in plan_raw.items():
+            levels = {}
+            for name, text in obj.items():
+                try:
+                    levels[name] = int(float(text))
+                except (TypeError, ValueError):
+                    levels[name] = None      # 非法值单独标记，检测时报出
+            plans[key] = levels
+        dO, gO = {}, {}
+        for name, text in cls._tower_map(tower, 'dO').items():
+            if name.isdigit():
+                try:
+                    dO[int(name)] = int(float(text))
+                except (TypeError, ValueError):
+                    pass
+        for name, text in cls._tower_map(tower, 'gO').items():
+            if name.isdigit():
+                try:
+                    gO[int(name)] = int(float(text))
+                except (TypeError, ValueError):
+                    pass
+        return {
+            'ws': cls._tower_bool(tower, 'ws', False),
+            'unendLv': cls._tower_num(tower, 'unendLv', 0),
+            'uP': cls._tower_num(tower, 'uP', 0),
+            'uAll': cls._tower_num(tower, 'uAll', 0),
+            'us': cls._tower_num(tower, 'us', 0),
+            'usUse': us_use,
+            'blv': cls._tower_num(tower, 'blv', 0),
+            # blv 带 .5 表示「通关但未领奖」的中间态（如 45.5），取整后会丢精度，
+            # 故额外保留原始文本 —— ws=false 的改动判定必须用它，否则 0.5 会被漏掉。
+            'blv_raw': (cls._tower_child(tower, 'blv').text or '').strip()
+                       if cls._tower_child(tower, 'blv') is not None else '',
+            'pNow': cls._tower_str(tower, 'pNow', '0').strip(),
+            'plans': plans,
+            'dO': dO,
+            'gO': gO,
+            'ng': cls._tower_str(tower, 'ng', '').strip(),
+            'has_lv': cls._tower_child(tower, 'lv') is not None,
+        }
+
+    @staticmethod
+    def _tower_is_default(text, default='0'):
+        """塔字段文本是否等于默认值（用于 ws=false 的「改动」判定）。
+
+        必需按**文本等价**比较而非真值判断：blv 默认值为字符串 '0'，
+        在 Python 中 '0' 为真值，直接 `if blv:` 会把默认档误判为已改动。
+        """
+        return (text or '').strip() in ('', default)
+
+    @staticmethod
+    def _tower_points_used(levels):
+        """方案已用点数 = Σ(等级 × 每级消耗)；未知键与非法值不参与累加。
+
+        权威：UnendData.getUsePoint → PeakProDefine.getMustPointSum(lv) =
+        Σ getMustPointByLv(i)，且 inData_byXML 令 firstPoint = point（第 1 级即 point）。
+        """
+        used = 0
+        for name, level in (levels or {}).items():
+            if not isinstance(level, int) or level <= 0:
+                continue
+            rule = TOWER_POINT_DEFS.get(name)
+            if rule:
+                used += level * rule[2]
+        return used
+
+    @classmethod
+    def check_tower_xml(cls, file_path):
+        """虚天塔 / 幻塔（tower 节点）检测。
+
+        判定项：
+          ① uP ≤ LEVEL_POINT（2）—— 每层最多 2 点，超出即异常。
+          ② us ≤ 每周上限 2；usUse 索引取值 0~6、不得重复、条数须等于 us。
+          ③ unendLv ≤ UnendAgent.MAX_LV（150）。
+          ④ 加点：等级不得超 unendProClass 上限；三方案各自「已用点数 ≤ 可用点数」，
+             可用点数 = unendLv × 2 + min(uP, 2)（UnendData.getAllPoint）。
+          ⑤ 幻塔：dO 层 1~75 且难度 1~4；gO ⊆ dO（须先通关才可能领奖）；
+             blv ≤ 75。
+
+        注：ws 为**显示层**开关（控制幻塔列表是否隐藏已通关层），
+        源码中无任何资格/校验用途，实测 ws=false 中亦有 124 档天塔已通 150 层，
+        故**不参与**合规判定（仅在报告中标注）—— 参见文件头 TOWER_WS_FIELD 注释。
+
+        返回 {title,status,msg,summary,tower}
+        """
+        title = '🗼 虚天塔/幻塔检测'
+        try:
+            profile = cls.tower_profile(file_path)
+        except Exception as e:
+            return {'title': title, 'status': 'warn',
+                    'msg': f"⚠️ 塔节点解析异常：{e}", 'summary': f"解析异常：{e}",
+                    'tower': None}
+        if profile is None:
+            return {'title': title, 'status': 'pass',
+                    'msg': "✅ 无 tower 节点（老版本存档，不涉及虚天塔/幻塔）",
+                    'summary': '无塔节点', 'tower': None}
+
+        errors = []          # fail 级
+        warns = []           # warn 级
+        ws = profile['ws']
+        unend_lv = profile['unendLv']
+        uP = profile['uP']
+        us = profile['us']
+        blv = profile['blv']
+        plan_used = {k: cls._tower_points_used(profile['plans'].get(k))
+                     for k in TOWER_PLAN_KEYS}
+        available = unend_lv * TOWER_LEVEL_POINT + min(uP, TOWER_LEVEL_POINT)
+
+        # ① ws —— 仅作**显示层**状态，不参与合规判定
+        #    （源码：getUIArr() 过滤已通关无奖励的层 / winShowB() 控制
+        #      「显示已通关层」按钮；实测 ws=false 中 124 档天塔已通 150 层，
+        #      与「参赛资格」自相矛盾）。此处仅在 ws=true 时附一行提示，
+        #      不判 fail、不参与状态计算。
+
+        # ② 虚天点数
+        if uP > TOWER_LEVEL_POINT:
+            errors.append(f"🚨 uP（当前层已获点数）={uP} 超过上限 {TOWER_LEVEL_POINT}")
+
+        # ③ 每周技能次数与使用记录
+        if us > TOWER_SKILL_WEEK_LIMIT:
+            errors.append(f"🚨 us（本周使用技能次数）={us} 超过每周上限 "
+                          f"{TOWER_SKILL_WEEK_LIMIT}")
+        if profile['usUse']:
+            try:
+                ids = [int(x) for x in profile['usUse'].split(',') if x.strip() != '']
+            except ValueError:
+                errors.append(f"🚨 usUse 格式非法：{profile['usUse']!r}")
+                ids = None
+            if ids is not None:
+                bad = [i for i in ids if not (0 <= i < len(TOWER_SKILL_ARR))]
+                if bad:
+                    errors.append(f"🚨 usUse 技能索引越界：{bad}"
+                                  f"（合法 0~{len(TOWER_SKILL_ARR) - 1}）")
+                if len(set(ids)) != len(ids):
+                    errors.append(f"🚨 usUse 技能索引重复：{profile['usUse']}")
+                if len(ids) != us:
+                    errors.append(f"🚨 usUse 条数 {len(ids)} 与 us={us} 不一致")
+        elif us:
+            errors.append(f"🚨 us={us} 但 usUse 为空（缺少技能使用记录）")
+
+        # ④ 天塔层数上限
+        if unend_lv > TOWER_MAX_LEVEL:
+            errors.append(f"🚨 unendLv（天塔通关层）={unend_lv} 超过上限 "
+                          f"{TOWER_MAX_LEVEL}")
+
+        # ⑤ 加点：等级上限 + 点数总量
+        for key in TOWER_PLAN_KEYS:
+            label = TOWER_PLAN_CN[key]
+            for name, level in (profile['plans'].get(key) or {}).items():
+                rule = TOWER_POINT_DEFS.get(name)
+                if rule is None:
+                    warns.append(f"⚠️ {label} 含未知加点项 {name}")
+                    continue
+                cn, cap, _ = rule
+                if level is None:
+                    errors.append(f"🚨 {label} 加点 {cn} 数值非法")
+                elif level < 0:
+                    errors.append(f"🚨 {label} 加点 {cn} 为负：{level}")
+                elif level > cap:
+                    errors.append(f"🚨 {label} 加点 {cn} 等级 {level} 超过上限 {cap}")
+            if plan_used[key] > available:
+                errors.append(
+                    f"🚨 {label} 已用点数 {plan_used[key]} > 可用点数 {available}"
+                    f"（unendLv {unend_lv}×{TOWER_LEVEL_POINT} + uP "
+                    f"{min(uP, TOWER_LEVEL_POINT)}）")
+        if profile['pNow'] not in ('0', '1', '2'):
+            errors.append(f"🚨 pNow（当前方案）非法：{profile['pNow']!r}")
+
+        # ⑥ 幻塔进度
+        bad_diff = {f: d for f, d in profile['dO'].items()
+                    if not (1 <= d <= TOWER_MAX_DIFF)}
+        if bad_diff:
+            errors.append(f"🚨 dO 通关难度越界（合法 1~{TOWER_MAX_DIFF}）：{bad_diff}")
+        bad_floor = sorted(f for f in profile['dO'] if not (1 <= f <= TOWER_MAX_FLOOR))
+        if bad_floor:
+            errors.append(f"🚨 dO 层号越界（合法 1~{TOWER_MAX_FLOOR}）：{bad_floor}")
+        over_gift = {f: (d, profile['dO'].get(f))
+                     for f, d in profile['gO'].items() if d > profile['dO'].get(f, 0)}
+        if over_gift:
+            errors.append("🚨 gO 领奖难度 > dO 通关难度（未通关却已领奖）："
+                          + "、".join(f"第{f}层 {g}>{d or 0}"
+                                      for f, (g, d) in sorted(over_gift.items())))
+        if blv > TOWER_MAX_FLOOR:
+            errors.append(f"🚨 blv（幻塔累计通关层）={blv} 超过层数上限 "
+                          f"{TOWER_MAX_FLOOR}")
+
+        # ---- 摘要 ----
+        skill_cn = []
+        if profile['usUse']:
+            try:
+                ids = [int(x) for x in profile['usUse'].split(',') if x.strip() != '']
+                skill_cn = [TOWER_SKILL_CN.get(TOWER_SKILL_ARR[i], str(i))
+                            for i in ids if 0 <= i < len(TOWER_SKILL_ARR)]
+            except ValueError:
+                pass
+        head = (f"天塔 {unend_lv}/{TOWER_MAX_LEVEL} 层 | "
+                f"点数 {plan_used['p0']}/{available} | "
+                f"每周技能 {us}/{TOWER_SKILL_WEEK_LIMIT}"
+                + (f"（{'、'.join(skill_cn)}）" if skill_cn else "")
+                + f" | 幻塔 {profile['blv_raw'] or blv}/{TOWER_MAX_FLOOR} 层")
+        if errors or warns:
+            status = 'fail' if errors else 'warn'
+        else:
+            status = 'pass'
+
+        lines = [head]
+        lines.extend(errors)
+        lines.extend(warns)
+        if not errors and not warns:
+            lines.append("✅ 塔数据无异常")
+        summary = "；".join(errors + warns) if (errors or warns) else head
+        return {'title': title, 'status': status, 'msg': "\n".join(lines),
+                'summary': summary, 'tower': profile}
+
+    # ----------------------------------------------------------------
+    # 🏔 巅峰（peak）检测
+    # ----------------------------------------------------------------
+    @classmethod
+    def peak_profile(cls, file_path):
+        """采集 peak 节点的全部字段（供检测与报告复用），无节点返回 None。
+
+        返回 {lv, exp, dayExp, dpN, dpDay, has_dpN, has_dpDay, now,
+              plans:{pointObj..:{键:等级}}, points:{pointObj..:已用点数}}
+        """
+        root, _, _ = smart_load_xml(file_path)
+        if root is None:
+            return None
+        save = root
+        if save.get('name') != 'null':
+            inner = save.find('s[@name="null"]')
+            if inner is not None:
+                save = inner
+        peak = save.find('s[@name="peak"]')
+        if peak is None:
+            return None
+
+        def num(name, default=None):
+            el = cls._tower_child(peak, name)
+            if el is None or not (el.text or '').strip():
+                return default
+            try:
+                return int(float(el.text.strip()))
+            except (TypeError, ValueError):
+                return el.text.strip()          # 非法值原样返回，检测时报出
+
+        plans = {}
+        for key in PEAK_PLAN_KEYS:
+            node = cls._tower_child(peak, key)
+            save_obj = cls._tower_child(node, 'saveObj') if node is not None else None
+            levels = {}
+            if save_obj is not None:
+                for child in save_obj:
+                    name = PEAK_POINT_ALIASES.get(
+                        (child.get('name') or '').strip(),
+                        (child.get('name') or '').strip())
+                    text = (child.text or '').strip()
+                    try:
+                        levels[name] = int(float(text))
+                    except (TypeError, ValueError):
+                        levels[name] = None     # 非法值单独标记，检测时报出
+            plans[key] = levels
+        return {
+            'lv': num('lv', 1),
+            'exp': num('exp', 0),
+            'dayExp': num('dayExp', 0),
+            'dpN': num('dpN', 0),
+            'dpDay': num('dpDay', 0),
+            # 老版本无 dpN / dpDay 字段（dpN/dpDay 自 v3x 起加入），
+            # 缺失时不应按 0 值参与「累计加点」类判定。
+            'has_dpN': cls._tower_child(peak, 'dpN') is not None,
+            'has_dpDay': cls._tower_child(peak, 'dpDay') is not None,
+            'now': (cls._tower_str(peak, 'now', '') or '').strip(),
+            'plans': plans,
+            'points': {k: cls._peak_points_used(plans[k]) for k in PEAK_PLAN_KEYS},
+        }
+
+    @staticmethod
+    def _peak_points_used(levels):
+        """方案已用点数 = Σ(等级 × 每级消耗)；未知键与非法值不参与累加。
+
+        权威：PeakData.getUsePoint → PeakProDefine.getMustPointSum(lv) =
+        Σ getMustPointByLv(i)；AS3 中普通属性 point=1、技能（skill 非空）point=2。
+        """
+        used = 0
+        for name, level in (levels or {}).items():
+            if not isinstance(level, int) or level <= 0:
+                continue
+            rule = PEAK_POINT_DEFS.get(name)
+            if rule:
+                used += level * rule[2]
+        return used
+
+    @classmethod
+    def check_peak_xml(cls, file_path):
+        """巅峰（peak 节点）检测。
+
+        判定项：
+          ① lv ∈ [1, 120]（PeakConst.MAX_LV）
+          ② exp ≥ 0；dayExp ≤ MAX_DAY_EXP（每日转化上限）
+          ③ dpN ≤ MAX_WHOLE_DPS_NUM（全体战力累计加点上限）；
+             且 dpN > 0 时 lv 必须 ≥ WHOLE_DPS_LV（未达等级无法加点）
+          ④ dpDay ≤ WHOLE_DPS_DAY（每日上限）
+          ⑤ now ∈ ["", "2", "3"]（PeakSave.labelArr）
+          ⑥ 加点：等级不超 peakPro 上限；三方案各自「已用点数 ≤ 可用点数（= lv）」
+
+        返回 {title,status,msg,summary,peak}
+        """
+        title = '🏔 巅峰检测'
+        try:
+            profile = cls.peak_profile(file_path)
+        except Exception as e:
+            return {'title': title, 'status': 'warn',
+                    'msg': f"⚠️ 巅峰节点解析异常：{e}", 'summary': f"解析异常：{e}",
+                    'peak': None}
+        if profile is None:
+            return {'title': title, 'status': 'pass',
+                    'msg': "✅ 无 peak 节点（老版本存档，不涉及巅峰）",
+                    'summary': '无巅峰节点', 'peak': None}
+
+        errors = []
+        warns = []
+        lv = profile['lv']
+        exp = profile['exp']
+        day_exp = profile['dayExp']
+        dp_n = profile['dpN']
+        dp_day = profile['dpDay']
+        now = profile['now']
+
+        # ① 等级
+        if not isinstance(lv, int):
+            errors.append(f"🚨 lv（巅峰等级）数值非法：{lv!r}")
+        elif lv < 1:
+            errors.append(f"🚨 lv（巅峰等级）={lv} 低于下限 1")
+        elif lv > PEAK_MAX_LEVEL:
+            errors.append(f"🚨 lv（巅峰等级）={lv} 超过上限 {PEAK_MAX_LEVEL}")
+
+        # ② 经验
+        if not isinstance(exp, int):
+            errors.append(f"🚨 exp（当前经验）数值非法：{exp!r}")
+        elif exp < 0:
+            errors.append(f"🚨 exp（当前经验）为负：{exp}")
+        if not isinstance(day_exp, int):
+            errors.append(f"🚨 dayExp（今日经验）数值非法：{day_exp!r}")
+        elif day_exp < 0:
+            errors.append(f"🚨 dayExp（今日经验）为负：{day_exp}")
+        elif day_exp > PEAK_MAX_DAY_EXP:
+            errors.append(f"🚨 dayExp（今日已转化经验）={day_exp} 超过每日上限 "
+                          f"{PEAK_MAX_DAY_EXP}")
+
+        # ③ 全体战力
+        if not isinstance(dp_n, int):
+            errors.append(f"🚨 dpN（全体战力加点次数）数值非法：{dp_n!r}")
+        elif dp_n < 0:
+            errors.append(f"🚨 dpN（全体战力加点次数）为负：{dp_n}")
+        elif dp_n > PEAK_MAX_WHOLE_DPS_NUM:
+            errors.append(f"🚨 dpN（全体战力加点次数）={dp_n} 超过上限 "
+                          f"{PEAK_MAX_WHOLE_DPS_NUM}")
+        if (profile['has_dpN'] and isinstance(dp_n, int) and dp_n > 0
+                and isinstance(lv, int) and lv < PEAK_WHOLE_DPS_LV):
+            errors.append(f"🚨 dpN={dp_n} 但 lv={lv} 未达开启等级 "
+                          f"{PEAK_WHOLE_DPS_LV}（该功能按等级解锁）")
+
+        # ④ 每日次数
+        if not isinstance(dp_day, int):
+            errors.append(f"🚨 dpDay（今日全体战力次数）数值非法：{dp_day!r}")
+        elif dp_day < 0:
+            errors.append(f"🚨 dpDay（今日全体战力次数）为负：{dp_day}")
+        elif dp_day > PEAK_WHOLE_DPS_DAY:
+            errors.append(f"🚨 dpDay（今日全体战力次数）={dp_day} 超过每日上限 "
+                          f"{PEAK_WHOLE_DPS_DAY}")
+
+        # ⑤ 当前方案
+        if now not in PEAK_NOW_VALUES:
+            errors.append(f"🚨 now（当前方案）非法：{now!r}"
+                          f"（合法 {list(PEAK_NOW_VALUES)}）")
+
+        # ⑥ 加点
+        available = lv if isinstance(lv, int) else 0
+        for key in PEAK_PLAN_KEYS:
+            label = PEAK_PLAN_CN[key]
+            for name, level in (profile['plans'].get(key) or {}).items():
+                rule = PEAK_POINT_DEFS.get(name)
+                if rule is None:
+                    warns.append(f"⚠️ {label} 含未知加点项 {name}")
+                    continue
+                cn, cap, _ = rule
+                if level is None:
+                    errors.append(f"🚨 {label} 加点 {cn} 数值非法")
+                elif level < 0:
+                    errors.append(f"🚨 {label} 加点 {cn} 为负：{level}")
+                elif level > cap:
+                    errors.append(f"🚨 {label} 加点 {cn} 等级 {level} 超过上限 {cap}")
+            used = profile['points'][key]
+            if used > available:
+                errors.append(f"🚨 {label} 已用点数 {used} > 可用点数 {available}"
+                              f"（可用点数 = 巅峰等级 {available}）")
+
+        # ---- 摘要 ----
+        cur = 'pointObj' + now if ('pointObj' + now) in profile['points'] else 'pointObj'
+        cur_used = profile['points'][cur]
+        head = (f"巅峰 {lv}/{PEAK_MAX_LEVEL} 级 | "
+                f"点数 {cur_used}/{available}"
+                + (f" | 全体战力 {dp_n}/{PEAK_MAX_WHOLE_DPS_NUM}"
+                   + (f"（今日 {dp_day}/{PEAK_WHOLE_DPS_DAY}）"
+                      if profile['has_dpDay'] else "")
+                   if profile['has_dpN'] else "")
+                + f" | 今日经验 {day_exp:,}")
+
+        status = 'fail' if errors else ('warn' if warns else 'pass')
+        lines = [head]
+        lines.extend(errors)
+        lines.extend(warns)
+        if not errors and not warns:
+            lines.append("✅ 巅峰数据无异常")
+        summary = "；".join(errors + warns) if (errors or warns) else head
+        return {'title': title, 'status': status, 'msg': "\n".join(lines),
+                'summary': summary, 'peak': profile}
+
+    # ----------------------------------------------------------------
+    # 🎫 零件位卡 / 黄金零件位卡检测
+    # ----------------------------------------------------------------
+    @staticmethod
+    def _grid_of(node):
+        """读取容器的 (lockObj 已解锁位集合, lockLen, gripMaxNum)。
+
+        lockObj 语义（ItemsSaveGroup.as）：{site: 1} 表示该 site 已额外解锁；
+        游戏写入时为 **1** 才有效（0/其它值视作未解锁）。
+        """
+        unlocked = set()
+        lo = node.find('s[@name="lockObj"]') if node is not None else None
+        if lo is not None:
+            for c in lo:
+                name = (c.get('name') or '').strip()
+                if not name.isdigit():
+                    continue
+                try:
+                    if int(float((c.text or '0').strip() or 0)) == 1:
+                        unlocked.add(int(name))
+                except (TypeError, ValueError):
+                    pass
+
+        def _num(child):
+            el = node.find(f's[@name="{child}"]') if node is not None else None
+            if el is None or not (el.text or '').strip():
+                return None
+            try:
+                return int(float(el.text.strip()))
+            except (TypeError, ValueError):
+                return None
+
+        return unlocked, _num('lockLen'), _num('gripMaxNum')
+
+    @staticmethod
+    def _grid_sites(node):
+        """容器 arr 内各条目的 site 列表（缺失/非法记 None）。"""
+        arr = node.find('s[@name="arr"]') if node is not None else None
+        if arr is None:
+            return []
+        out = []
+        for it in arr:
+            sn = it.find('s[@name="site"]')
+            text = (sn.text or '').strip() if sn is not None else ''
+            if not text:
+                out.append(None)
+                continue
+            try:
+                out.append(int(float(text)))
+            except ValueError:
+                out.append(None)
+        return out
+
+    @classmethod
+    def grid_card_profile(cls, file_path):
+        """采集位卡数据：武器镶嵌位占用 / 背包槽位 / 位卡持有与获取记录。
+
+        返回 {containers:[{node,kind,lockLen,gripMax,filled,maxSite,illegal:[(site,limit)]}],
+              need:{卡名: 份数}, hold/buy/paid/compose:{卡名: 份数},
+              available:{卡名: 份数}, missing:{卡名: 份数}, short:[文本]}
+
+        · kind='partsSave' → 武器镶嵌零件位（基础 0~9，其余需解锁）
+        · kind='bag'       → 背包类容器（lockLen 即基础额度，lockObj 记为额外解锁）
+        无任何相关节点时返回 None。
+        """
+        root, _, _ = smart_load_xml(file_path)
+        if root is None:
+            return None
+        save = root
+        if save.get('name') != 'null':
+            inner = save.find('s[@name="null"]')
+            if inner is not None:
+                save = inner
+
+        containers = []
+        need = defaultdict(int)
+
+        # ---- ① 武器镶嵌位（arms / armsBag / armsHouse / equip*）----
+        for node_name in AssetCollector.ARMS_NODES:
+            cont = save.find(f's[@name="{node_name}"]')
+            if cont is None:
+                continue
+            arr = cont.find('s[@name="arr"]')
+            if arr is None:
+                continue
+            for it in arr:
+                ps = it.find('s[@name="partsSave"]')
+                if ps is None:
+                    continue
+                unlocked, lock_len, grip_max = cls._grid_of(ps)
+                if lock_len is None:
+                    continue
+                sites = [s for s in cls._grid_sites(ps) if s is not None]
+                if not sites:
+                    continue
+                # 权威：site <= lockLen-1 或 lockObj[site]==1 才算已解锁
+                limit = max(lock_len, PARTS_WEAR_BASE_UNLOCK)
+                illegal = sorted({s for s in sites
+                                  if s >= limit and s not in unlocked})
+                for s in sites:
+                    cost = PARTS_SLOT_UNLOCK_COST.get(s)
+                    if cost and cost[0]:
+                        need[cost[0]] += cost[1]
+                containers.append({
+                    'node': f'{node_name}/partsSave',
+                    'kind': 'partsSave',
+                    'lockLen': lock_len,
+                    'gripMax': grip_max,
+                    'filled': len(sites),
+                    'maxSite': max(sites),
+                    'unlocked': sorted(unlocked),
+                    'illegal': illegal,
+                })
+
+        # ---- ② 背包类容器（含 partsBag）----
+        for node_name in AssetCollector.BAG_NODES:
+            cont = save.find(f's[@name="{node_name}"]')
+            if cont is None:
+                continue
+            unlocked, lock_len, grip_max = cls._grid_of(cont)
+            if lock_len is None:
+                continue
+            sites = [s for s in cls._grid_sites(cont) if s is not None]
+            if not sites:
+                continue
+            illegal = sorted({s for s in sites
+                              if s >= lock_len and s not in unlocked})
+            containers.append({
+                'node': node_name,
+                'kind': 'bag',
+                'lockLen': lock_len,
+                'gripMax': grip_max,
+                'filled': len(sites),
+                'maxSite': max(sites),
+                'unlocked': sorted(unlocked),
+                'illegal': illegal,
+            })
+
+        if not containers:
+            return None
+
+        # ---- ③ 位卡持有与获取记录 ----
+        hold, buy, paid, compose = {}, {}, {}, {}
+        tb = save.find('s[@name="thingsBag"]')
+        if tb is not None:
+            arr = tb.find('s[@name="arr"]')
+            if arr is not None:
+                for it in arr:
+                    name = AssetCollector._child_text(it, 'name')
+                    if name not in GRID_CARD_CN:
+                        continue
+                    hold[name] = hold.get(name, 0) + max(
+                        0, AssetCollector._num(
+                            AssetCollector._child_text(it, 'nowNum'), 0))
+        # 券购（goods.buyNumObj，键形如 partsGridCard_p，值经 toCode32 编码）
+        goods = save.find('s[@name="goods"]/s[@name="buyNumObj"]')
+        if goods is not None:
+            for c in goods:
+                base = parts_base_label(c.get('name') or '')
+                if base in GRID_CARD_CN:
+                    num = decode_text32_number(c.text, None)
+                    if num:
+                        buy[base] = buy.get(base, 0) + num
+        # 商店购买（pay.obj 只记 propId；同一卡可能有多个历史 propId，见上方注释）
+        pay = save.find('s[@name="pay"]/s[@name="obj"]')
+        if pay is not None:
+            reverse = {str(pid): key
+                       for key, pids in GRID_CARD_PROP_ID.items() for pid in pids}
+            for c in pay:
+                key = reverse.get((c.get('name') or '').strip())
+                if not key:
+                    continue
+                try:
+                    num = int(float((c.text or '0').strip() or 0))
+                except ValueError:
+                    num = 0
+                if num:
+                    paid[key] = paid.get(key, 0) + num
+        # 合成（gift.caO.saveObj，值经 toCode32 编码）
+        ca = save.find('s[@name="gift"]/s[@name="caO"]/s[@name="saveObj"]')
+        if ca is not None:
+            for c in ca:
+                base = parts_base_label(c.get('name') or '')
+                if base in GRID_CARD_CN:
+                    num = decode_text32_number(c.text, None)
+                    if num:
+                        compose[base] = compose.get(base, 0) + num
+
+        available = {k: (hold.get(k, 0) + buy.get(k, 0)
+                         + paid.get(k, 0) + compose.get(k, 0))
+                     for k in GRID_CARD_CN}
+        missing = {k: need[k] - available.get(k, 0)
+                   for k in need if need[k] > available.get(k, 0)}
+        return {'containers': containers, 'need': dict(need), 'hold': hold,
+                'buy': buy, 'paid': paid, 'compose': compose,
+                'available': available, 'missing': missing}
+
+    @classmethod
+    def check_grid_card_xml(cls, file_path):
+        """零件位卡 / 黄金零件位卡检测（武器镶嵌位解锁 + 位卡账目）。
+
+        判定项：
+          ① **fail** 占用未解锁槽位（权威 ItemsSaveGroup.getUnlockBySite）：
+             site ≥ max(lockLen, PARTS_WEAR_BASE_UNLOCK) 且不在 lockObj 中，
+             却在存档里放着零件 —— 游戏内该位置根本放不进去，必为改档。
+             实测全库 2046 档仅 3 档命中（2634796502_0/_3/_4）。
+          ② **warn** 位卡账目差额：解锁 site 11~16 需消耗 黄金位卡 / 零件位卡
+             （MustDefineGroup.as；site 10 仅需 50 万硬币 ≈ 免费）。
+             黄金位卡另有活动/签到等存档内无记录的来源，故账目差额
+             **仅作提示**（不判 fail），供人工复核。
+
+        返回 {title,status,msg,summary,grid}
+        """
+        title = '🎫 零件位卡检测'
+        try:
+            profile = cls.grid_card_profile(file_path)
+        except Exception as e:
+            return {'title': title, 'status': 'warn',
+                    'msg': f"⚠️ 位卡数据解析异常：{e}", 'summary': f"解析异常：{e}",
+                    'grid': None}
+        if profile is None:
+            return {'title': title, 'status': 'pass',
+                    'msg': "✅ 无相关容器，未涉及零件位卡", 'summary': '无位卡数据',
+                    'grid': None}
+
+        containers = profile['containers']
+        need = profile['need']
+        available = profile['available']
+        missing = profile['missing']
+
+        # ① 占用未解锁槽位（权威硬约束 → fail）
+        errors = []
+        for c in [x for x in containers if x['illegal']][:6]:
+            errors.append(
+                f"🚨 {c['node']} 存在未解锁槽位却已放置：site {c['illegal'][:8]}"
+                + (f"…共{len(c['illegal'])}处" if len(c['illegal']) > 8 else "")
+                + f"（基础解锁 0~{PARTS_WEAR_BASE_UNLOCK - 1}，lockObj 未登记）")
+
+        # ② 位卡账目差额（另有活动等无记录来源 → 仅提示）
+        warns = []
+        for key, gap in sorted(missing.items(), key=lambda x: -x[1]):
+            warns.append(
+                f"⚠️ {GRID_CARD_CN[key]}（{key}）账目差额：需 {need.get(key, 0)} 张，"
+                f"可查来源 {available.get(key, 0)} 张"
+                f"（持有{profile['hold'].get(key, 0)}"
+                f"+券购{profile['buy'].get(key, 0)}"
+                f"+商店{profile['paid'].get(key, 0)}"
+                f"+合成{profile['compose'].get(key, 0)}）"
+                f"，差 {gap} 张（活动/签到等无记录来源未计入，需人工复核）")
+
+        # ---- 摘要 ----
+        wear = [c for c in containers if c['kind'] == 'partsSave']
+        bags = [c for c in containers if c['kind'] == 'bag']
+        bits = []
+        if wear:
+            bits.append(f"镶嵌位最高 site {max(c['maxSite'] for c in wear)}")
+        pb = next((c for c in bags if c['node'] == 'partsBag'), None)
+        if pb:
+            bits.append(f"零件背包 {pb['filled']}/{pb['lockLen']} 位")
+        held = "、".join(f"{GRID_CARD_CN[k]} {profile['hold'][k]}"
+                         for k in GRID_CARD_CN if profile['hold'].get(k))
+        bits.append("位卡 " + (held or "无"))
+        head = "｜".join(bits)
+
+        if errors:
+            status = 'fail'
+        elif warns:
+            status = 'warn'
+        else:
+            status = 'pass'
+        lines = [head]
+        lines.extend(errors)
+        lines.extend(warns)
+        if not errors and not warns:
+            lines.append("✅ 位卡数据无异常")
+        summary = "；".join(errors + warns) if (errors or warns) else head
+        return {'title': title, 'status': status, 'msg': "\n".join(lines),
+                'summary': summary, 'grid': profile}
 
     @staticmethod
     def check_uid_md5_advanced(file_path):
@@ -5137,6 +6407,21 @@ class AppDetector:
         asset_res = DetectionEngine.check_asset_nodes(file_path, max_details=max_details)
         results.append(asset_res)
         extra['asset_res'] = asset_res
+
+        # 7. 虚天塔 / 幻塔（tower 节点）：ws 资格、点数、每周技能、加点、幻塔进度
+        tower_res = DetectionEngine.check_tower_xml(file_path)
+        results.append(tower_res)
+        extra['tower_res'] = tower_res
+
+        # 8. 巅峰（peak 节点）：等级/经验/全体战力/加点方案
+        peak_res = DetectionEngine.check_peak_xml(file_path)
+        results.append(peak_res)
+        extra['peak_res'] = peak_res
+
+        # 9. 零件位卡 / 黄金零件位卡：镶嵌位解锁 + 位卡账目
+        grid_res = DetectionEngine.check_grid_card_xml(file_path)
+        results.append(grid_res)
+        extra['grid_res'] = grid_res
         return results, extra
 
     @staticmethod
@@ -5342,6 +6627,55 @@ class AppDetector:
                 #   资产列必须取本槽位的值，不能沿用 UID 合并后的最大值。
                 asset_slot = ReportRenderer.build_slot_asset_summary(asset_res)
 
+            # 虚天塔/幻塔：槽位级数据（CSV 列 + 详情文件展示）
+            tower_res = res.get('tower_res') or {}
+            tower_slot = {}
+            prof = tower_res.get('tower')
+            if prof:
+                tower_slot = {
+                    'ws': prof['ws'],
+                    'unendLv': prof['unendLv'],
+                    'uP': prof['uP'],
+                    'us': prof['us'],
+                    'usUse': prof['usUse'],
+                    'blv': prof['blv'],
+                    'points': {k: DetectionEngine._tower_points_used(prof['plans'].get(k))
+                               for k in TOWER_PLAN_KEYS},
+                    'available': (prof['unendLv'] * TOWER_LEVEL_POINT
+                                  + min(prof['uP'], TOWER_LEVEL_POINT)),
+                    'text': ReportRenderer.build_slot_tower_summary(tower_res),
+                }
+
+            # 巅峰：槽位级数据（CSV 列 + 详情文件展示）
+            peak_res = res.get('peak_res') or {}
+            peak_slot = {}
+            pprof = peak_res.get('peak')
+            if pprof:
+                peak_slot = {
+                    'lv': pprof['lv'],
+                    'exp': pprof['exp'],
+                    'dayExp': pprof['dayExp'],
+                    'dpN': pprof['dpN'],
+                    'dpDay': pprof['dpDay'],
+                    'has_dpN': pprof['has_dpN'],
+                    'now': pprof['now'],
+                    'points': dict(pprof['points']),
+                    'text': ReportRenderer.build_slot_peak_summary(peak_res),
+                }
+
+            # 零件位卡：槽位级数据（CSV 列 + 详情文件展示）
+            grid_res = res.get('grid_res') or {}
+            grid_slot = {}
+            gprof = grid_res.get('grid')
+            if gprof:
+                grid_slot = {
+                    'need': gprof['need'],
+                    'hold': gprof['hold'],
+                    'available': gprof['available'],
+                    'missing': gprof['missing'],
+                    'text': ReportRenderer.build_slot_grid_card_summary(grid_res),
+                }
+
             uid_group.setdefault(group_uid, []).append({
                 'fname': fname,
                 'name': file_name or '',
@@ -5358,6 +6692,12 @@ class AppDetector:
                 'detail_lines': detail_lines,
                 'asset_lines': asset_lines,
                 'asset': asset_slot,
+                'tower': tower_slot,
+                'tower_status': tower_res.get('status'),
+                'peak': peak_slot,
+                'peak_status': peak_res.get('status'),
+                'grid': grid_slot,
+                'grid_status': grid_res.get('status'),
                 'issues': issues,
             })
 
@@ -5407,6 +6747,12 @@ class AppDetector:
                                        any('🚨' in ln or '🔻' in ln or '💳' in ln
                                            for ln in it['asset_lines'])
                                        for it in items),
+                'has_tower_issue': any(it.get('tower_status') == 'fail'
+                                       for it in items),
+                'has_peak_issue': any(it.get('peak_status') == 'fail'
+                                      for it in items),
+                'has_grid_issue': any(it.get('grid_status') == 'fail'
+                                      for it in items),
             })
         return uid_rows
 
@@ -5509,6 +6855,21 @@ class AppDetector:
         uid_assets = self._finalize_asset_results(file_result_map)
         self.log(f"💎 资产按UID合并统计完成：{len(uid_assets)} 个账号", "INFO")
 
+        # 虚天塔/幻塔：按 UID 合并（同一账号多档取最高进度，技能次数取最大值）
+        uid_towers = self._finalize_tower_results(file_result_map)
+        if uid_towers:
+            self.log(f"🗼 塔数据按UID合并统计完成：{len(uid_towers)} 个账号", "INFO")
+
+        # 巅峰：按 UID 合并（同一账号多档取最高等级/进度）
+        uid_peaks = self._finalize_peak_results(file_result_map)
+        if uid_peaks:
+            self.log(f"🏔 巅峰按UID合并统计完成：{len(uid_peaks)} 个账号", "INFO")
+
+        # 零件位卡：按 UID 合并（同一账号多档取最靠前进度）
+        uid_grids = self._finalize_grid_card_results(file_result_map)
+        if uid_grids:
+            self.log(f"🎫 位卡按UID合并统计完成：{len(uid_grids)} 个账号", "INFO")
+
         # 联合检测可能改变 overall，按最终结果统计并输出逐文件日志
         success = warn = fail = 0
         for fp in file_list:
@@ -5539,6 +6900,27 @@ class AppDetector:
             self.log(f"💎 资产差值异常账号 {len(asset_issue_uids)} 个："
                      + "、".join(asset_issue_uids[:10])
                      + ("…" if len(asset_issue_uids) > 10 else ""), "FAIL")
+
+        # 塔异常（含 ws=false 却改动）同样单独汇总
+        tower_issue_uids = [r['uid'] for r in uid_rows if r.get('has_tower_issue')]
+        if tower_issue_uids:
+            self.log(f"🗼 塔数据异常账号 {len(tower_issue_uids)} 个："
+                     + "、".join(tower_issue_uids[:10])
+                     + ("…" if len(tower_issue_uids) > 10 else ""), "FAIL")
+
+        # 巅峰异常（等级/经验/全体战力/加点）
+        peak_issue_uids = [r['uid'] for r in uid_rows if r.get('has_peak_issue')]
+        if peak_issue_uids:
+            self.log(f"🏔 巅峰数据异常账号 {len(peak_issue_uids)} 个："
+                     + "、".join(peak_issue_uids[:10])
+                     + ("…" if len(peak_issue_uids) > 10 else ""), "FAIL")
+
+        # 零件位卡异常（占用未解锁槽位）
+        grid_issue_uids = [r['uid'] for r in uid_rows if r.get('has_grid_issue')]
+        if grid_issue_uids:
+            self.log(f"🎫 位卡数据异常账号 {len(grid_issue_uids)} 个："
+                     + "、".join(grid_issue_uids[:10])
+                     + ("…" if len(grid_issue_uids) > 10 else ""), "FAIL")
 
         for row in uid_rows:
             self._write_uid_detail_file(row['uid'], row['items'], row['inactive_bans'],
@@ -5745,6 +7127,164 @@ class AppDetector:
         return out
 
     @staticmethod
+    def _finalize_tower_results(file_result_map):
+        """按 UID 汇总虚天塔/幻塔数据（供批量 CSV 与详情文件展示）。
+
+        同一账号的多个存档是**同一份塔数据的不同时间快照**，故取各字段的
+        「最靠前进度」合并（不能相加）：
+          • unendLv / blv / uP / us 取最大值；
+          • dO / gO 取各层最大难度并集；
+          • p0~p2 取各存档中点数和最大的方案（同一方案的不同快照取高者）；
+          • ws（显示开关）取「与」—— 任一档设了「列表隐藏已通关层」即视为已设置；
+          • 异常标记 / 摘要按 (存档, 问题) 去重后保留。
+
+        返回 {uid: {profile..., 'issues': [...], 'abnormal': bool}}；无塔数据不登记。
+        """
+        merged = {}
+        for res in file_result_map.values():
+            uid = res.get('uid')
+            tower_res = res.get('tower_res')
+            if not uid or not tower_res or not tower_res.get('tower'):
+                continue
+            prof = tower_res['tower']
+            entry = merged.get(uid)
+            if entry is None:
+                entry = merged[uid] = dict(prof)
+                entry['plans'] = {k: dict(prof['plans'].get(k) or {})
+                                  for k in TOWER_PLAN_KEYS}
+                entry['dO'] = dict(prof['dO'])
+                entry['gO'] = dict(prof['gO'])
+                entry['issues'] = []
+                entry['abnormal'] = False
+            else:
+                for field in ('unendLv', 'blv', 'uP', 'us'):
+                    entry[field] = max(entry.get(field) or 0, prof.get(field) or 0)
+                entry['ws'] = bool(entry.get('ws')) and bool(prof.get('ws'))
+                for floor, diff in prof['dO'].items():
+                    entry['dO'][floor] = max(entry['dO'].get(floor, 0), diff)
+                for floor, diff in prof['gO'].items():
+                    entry['gO'][floor] = max(entry['gO'].get(floor, 0), diff)
+                for key in TOWER_PLAN_KEYS:
+                    cur = entry['plans'].get(key) or {}
+                    new = prof['plans'].get(key) or {}
+                    if (DetectionEngine._tower_points_used(new)
+                            > DetectionEngine._tower_points_used(cur)):
+                        entry['plans'][key] = dict(new)
+                if prof.get('usUse'):
+                    entry['usUse'] = prof['usUse']
+                entry['abnormal'] = entry['abnormal'] or tower_res.get('status') == 'fail'
+            if tower_res.get('status') in ('fail', 'warn'):
+                entry['abnormal'] = entry['abnormal'] or tower_res.get('status') == 'fail'
+                issue = tower_res.get('summary') or ''
+                if issue and issue not in entry['issues']:
+                    entry['issues'].append(issue)
+        return merged
+
+    @staticmethod
+    def _finalize_peak_results(file_result_map):
+        """按 UID 汇总巅峰数据（供批量 CSV 与详情文件展示）。
+
+        同一账号的多个存档是**同一份巅峰数据的不同时间快照**，故取最靠前进度
+        （不能相加）：
+          • lv / exp / dpN 取最大值，dayExp / dpDay 取最大值（快照口径）；
+          • pointObj~pointObj3 取点数和最大的方案（同一方案不同快照取高者）；
+          • now 取最近一次出现的非空值；
+          • 异常标记 / 摘要按问题去重后保留。
+
+        返回 {uid: {profile..., 'issues': [...], 'abnormal': bool}}；无巅峰数据不登记。
+        """
+        merged = {}
+        for res in file_result_map.values():
+            uid = res.get('uid')
+            peak_res = res.get('peak_res')
+            if not uid or not peak_res or not peak_res.get('peak'):
+                continue
+            prof = peak_res['peak']
+            entry = merged.get(uid)
+            if entry is None:
+                entry = merged[uid] = dict(prof)
+                entry['plans'] = {k: dict(prof['plans'].get(k) or {})
+                                  for k in PEAK_PLAN_KEYS}
+                entry['points'] = dict(prof['points'])
+                entry['issues'] = []
+                entry['abnormal'] = False
+            else:
+                for field in ('lv', 'exp', 'dpN', 'dayExp', 'dpDay'):
+                    cur, new = entry.get(field), prof.get(field)
+                    if isinstance(cur, int) and isinstance(new, int):
+                        entry[field] = max(cur, new)
+                    elif new is not None and not isinstance(cur, int):
+                        entry[field] = new
+                entry['has_dpN'] = entry.get('has_dpN') or prof.get('has_dpN')
+                entry['has_dpDay'] = entry.get('has_dpDay') or prof.get('has_dpDay')
+                if prof.get('now'):
+                    entry['now'] = prof['now']
+                for key in PEAK_PLAN_KEYS:
+                    if prof['points'].get(key, 0) > entry['points'].get(key, 0):
+                        entry['plans'][key] = dict(prof['plans'].get(key) or {})
+                        entry['points'][key] = prof['points'][key]
+            if peak_res.get('status') in ('fail', 'warn'):
+                entry['abnormal'] = entry['abnormal'] or peak_res.get('status') == 'fail'
+                issue = peak_res.get('summary') or ''
+                if issue and issue not in entry['issues']:
+                    entry['issues'].append(issue)
+        return merged
+
+    @staticmethod
+    def _finalize_grid_card_results(file_result_map):
+        """按 UID 汇总零件位卡数据（供批量 CSV 与详情文件展示）。
+
+        同一账号的多个存档是**同一份数据的不同时间快照**，故取最靠前进度：
+          • 已解锁/已占用槽位取最大值（按「需要最多的那份快照」）；
+          • 位卡持有/获取记录取最大值；
+          • 账目差额按「需求最大快照」计算；
+          • 异常标记 / 摘要去重保留。
+
+        返回 {uid: {profile..., 'issues': [...], 'abnormal': bool}}；无数据不登记。
+        """
+        merged = {}
+        for res in file_result_map.values():
+            uid = res.get('uid')
+            grid_res = res.get('grid_res')
+            if not uid or not grid_res or not grid_res.get('grid'):
+                continue
+            prof = grid_res['grid']
+            entry = merged.get(uid)
+            if entry is None:
+                entry = merged[uid] = dict(prof)
+                entry['containers'] = [dict(c) for c in prof['containers']]
+                entry['need'] = dict(prof['need'])
+                entry['hold'] = dict(prof['hold'])
+                entry['buy'] = dict(prof['buy'])
+                entry['paid'] = dict(prof['paid'])
+                entry['compose'] = dict(prof['compose'])
+                entry['available'] = dict(prof['available'])
+                entry['missing'] = dict(prof['missing'])
+                entry['issues'] = []
+                entry['abnormal'] = False
+            else:
+                # 容器：同名取 maxSite / illegal 更多的一份
+                by_node = {c['node']: c for c in entry['containers']}
+                for c in prof['containers']:
+                    prev = by_node.get(c['node'])
+                    if prev is None or c['maxSite'] > prev['maxSite']:
+                        by_node[c['node']] = dict(c)
+                entry['containers'] = list(by_node.values())
+                for field in ('need', 'hold', 'buy', 'paid', 'compose', 'available',
+                              'missing'):
+                    cur = entry.get(field) or {}
+                    new = prof.get(field) or {}
+                    for k, v in new.items():
+                        cur[k] = max(cur.get(k, 0), v)
+                    entry[field] = cur
+            if grid_res.get('status') in ('fail', 'warn'):
+                entry['abnormal'] = entry['abnormal'] or grid_res.get('status') == 'fail'
+                issue = grid_res.get('summary') or ''
+                if issue and issue not in entry['issues']:
+                    entry['issues'].append(issue)
+        return merged
+
+    @staticmethod
     def _finalize_batch_results(file_result_map, uid_max_vip=None):
         """按账号（同一 UID）合并消费统计并完成 VIP 联合检测。
 
@@ -5848,9 +7388,15 @@ class AppDetector:
         cheat_res = DetectionEngine.check_cheat_stream(file_path)
         vip_res = DetectionEngine.check_vip_xml(file_path)
         asset_res = DetectionEngine.check_asset_nodes(file_path, max_details=max_details)
+        tower_res = DetectionEngine.check_tower_xml(file_path)
+        peak_res = DetectionEngine.check_peak_xml(file_path)
+        grid_res = DetectionEngine.check_grid_card_xml(file_path)
 
         results = [ban_result] + [uid_res_checked] + cheat_res['details'] + [vip_res, pay_res,
-                                                                            asset_res]
+                                                                            asset_res,
+                                                                            tower_res,
+                                                                            peak_res,
+                                                                            grid_res]
         overall = AppDetector._overall_of(results)
 
         return {
@@ -5860,6 +7406,9 @@ class AppDetector:
             'overall': overall,
             'results': results,
             'asset_res': asset_res,
+            'tower_res': tower_res,
+            'peak_res': peak_res,
+            'grid_res': grid_res,
             'ban_tag': ban_tag,
             'file_uid': file_uid,
             'file_index': file_index,
@@ -6023,6 +7572,9 @@ def detect_file(file_path, config_file=None, log=None, **overrides):
         'ban_reason': extra.get('ban_reason'),
         'total_cost': extra.get('total_cost', 0),
         'asset_res': extra.get('asset_res'),
+        'tower_res': extra.get('tower_res'),
+        'peak_res': extra.get('peak_res'),
+        'grid_res': extra.get('grid_res'),
         'report_text': ReportRenderer.render_single_report(meta, results),
     }
 
@@ -6108,6 +7660,9 @@ def detect_folder(folder_path, config_file=None, log=None, out_dir=None,
         else:
             success += 1
 
+    uid_towers = AppDetector._finalize_tower_results(file_result_map)
+    uid_peaks = AppDetector._finalize_peak_results(file_result_map)
+    uid_grids = AppDetector._finalize_grid_card_results(file_result_map)
     uid_rows = AppDetector._build_uid_groups(file_result_map, uid_max_vip, uid_assets,
                                              settings['max_export_details'])
 
@@ -6133,7 +7688,8 @@ def detect_folder(folder_path, config_file=None, log=None, out_dir=None,
     return {'folder': folder, 'total': total, 'success': success, 'warn': warn,
             'fail': fail, 'uid_rows': uid_rows, 'csv_path': csv_path,
             'detail_paths': detail_paths, 'uid_total_cost': uid_total_cost,
-            'uid_assets': uid_assets}
+            'uid_assets': uid_assets, 'uid_towers': uid_towers, 'uid_peaks': uid_peaks,
+            'uid_grids': uid_grids}
 
 
 def run_tool():

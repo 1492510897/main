@@ -86,8 +86,8 @@ MAX_RETRIES = 3
 # ================= 申请节流（防封） =================
 # 每申请 REQUEST_BATCH_SIZE 个存档（槽位）暂停 REQUEST_PAUSE_TIME 秒；
 # 由 SaveArchiver._acquire_request_slot 统一执行，暂停期间不会发出新申请。
-REQUEST_BATCH_SIZE = 200
-REQUEST_PAUSE_TIME = 30
+REQUEST_BATCH_SIZE = 50
+REQUEST_PAUSE_TIME = 10
 
 # ================= 槽位状态标记 =================
 # download_single_slot 返回的 status 字段（字符串标记，区别于服务器返回的 status 码）
