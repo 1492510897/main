@@ -1,4 +1,4 @@
-"""info_get3 —— 爆枪突击逐槽存档下载器（α 线 · v3.2.0 整合版）
+"""info_get3 —— （α 线 · v3.2.0 整合版）
 
 定位
 ====
@@ -22,7 +22,8 @@ v3.2.0 整合要点
   • XML 命名 <uid>_<idx>_<标题>.xml，过滤非法字符与控制字符，避免同名覆盖；
   • raw/<uid>_<idx>.json 保留服务器原始响应；
   • 线程安全 UI：子线程只投递队列、主线程轮询执行，避免 Tcl_AsyncDelete 崩溃；
-    支持 run_tool(parent) 以 Toplevel 子窗口嵌入主程序。
+    支持 run_tool(parent) 以 Toplevel 子窗口嵌入主程序；
+  • 运行日志：清除前二次确认，支持一键导出为 txt 文件。
 
 任务文件格式
 ============
@@ -501,7 +502,9 @@ class App:
                                   command=self.stop_batch_task, state=tk.DISABLED)
         self.stop_btn.grid(row=2, column=1, padx=5, pady=5)
         tk.Button(btn_frame, text="🧹 清除日志", **mk_btn("#74c7ec"),
-                  command=self.clear_log).grid(row=3, column=0, columnspan=2, padx=5, pady=5)
+                  command=self.clear_log).grid(row=3, column=0, padx=5, pady=5)
+        tk.Button(btn_frame, text="💾 导出日志", **mk_btn("#94e2d5"),
+                  command=self.export_log).grid(row=3, column=1, padx=5, pady=5)
 
         status_line = tk.Frame(left_frame, bg="#28293b")
         status_line.pack(fill=tk.X, padx=15)
@@ -555,7 +558,16 @@ class App:
         self.log(msg, "warn")
 
     def clear_log(self):
-        self._ui_call(self._clear_log_widget)
+        """线程安全：确认与清除都在主线程执行。"""
+        self._ui_call(self._confirm_clear_log)
+
+    def _confirm_clear_log(self):
+        if not self._alive:
+            return
+        if not messagebox.askyesno("确认清除", "确定要清除当前运行日志吗？\n（清除后无法恢复，建议先导出）",
+                                   parent=self.root):
+            return
+        self._clear_log_widget()
 
     def _clear_log_widget(self):
         if not self._alive:
@@ -563,6 +575,34 @@ class App:
         self.log_text.config(state=tk.NORMAL)
         self.log_text.delete(1.0, tk.END)
         self.log_text.config(state=tk.DISABLED)
+
+    def export_log(self):
+        """线程安全：把当前日志内容导出到文本文件，保存对话框在主线程弹出。"""
+        self._ui_call(self._export_log_widget)
+
+    def _export_log_widget(self):
+        if not self._alive:
+            return
+        content = self.log_text.get("1.0", tk.END).rstrip("\n")
+        if not content.strip():
+            messagebox.showinfo("提示", "当前没有可导出的日志内容", parent=self.root)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="导出运行日志",
+            initialfile=time.strftime("运行日志_%Y%m%d_%H%M%S.txt"),
+            defaultextension=".txt",
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8-sig") as f:
+                f.write(content + "\n")
+        except OSError as e:
+            messagebox.showerror("导出失败", f"无法写入文件：\n{e}", parent=self.root)
+            return
+        self.log(f"💾 日志已导出：{path}")
+        messagebox.showinfo("导出成功", f"日志已保存到：\n{path}", parent=self.root)
 
     # ---------------- 申请节流 ----------------
     def _on_throttle(self, msg, warn=False):
